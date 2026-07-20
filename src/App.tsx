@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from "uuid";
 import ResourceCard from "./components/ResourceCard";
 import { Resource, GameState } from "./types";
 import React, { useState, useEffect } from "react";
+import { id, resourceIds, SessionState } from "./multiplayer";
 
 const initialResources: Resource[] = [
   { id: uuidv4(), name: "MC", amount: 0, production: 0, isMegaCredit: true },
@@ -42,6 +43,43 @@ function App() {
   const [undoStack, setUndoStack] = useState<GameState[]>([]);
   const [redoStack, setRedoStack] = useState<GameState[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [serverUrl, setServerUrl] = useState("ws://localhost:8080/ws");
+  const [displayName, setDisplayName] = useState("");
+  const [joinSessionId, setJoinSessionId] = useState("");
+  const [joinCode, setJoinCode] = useState("");
+  const [socket, setSocket] = useState<WebSocket | null>(null);
+  const [session, setSession] = useState<SessionState | null>(null);
+  const [clientId] = useState(() => localStorage.getItem("multiplayerClientId") || id());
+
+  useEffect(() => { localStorage.setItem("multiplayerClientId", clientId); }, [clientId]);
+  useEffect(() => () => socket?.close(), [socket]);
+
+  const send = (message: Record<string, unknown>) => socket?.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ protocolVersion: "v1", requestId: id(), ...message }));
+  const connect = (afterOpen: (connection: WebSocket) => void) => {
+    if (!displayName.trim()) { setError("Enter your player name first."); return; }
+    socket?.close();
+    const next = new WebSocket(serverUrl);
+    next.onopen = () => { setError(null); afterOpen(next); };
+    next.onerror = () => setError("Could not connect to the local server.");
+    next.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === "sessionCreated") {
+        setJoinSessionId(message.sessionId); setJoinCode(message.joinCode);
+        next.send(JSON.stringify({ type: "joinSession", protocolVersion: "v1", requestId: id(), sessionId: message.sessionId, joinCode: message.joinCode, clientId, displayName }));
+      }
+      if (message.sessionState) { setSession(message.sessionState); setError(null); }
+      if (message.type === "stateSnapshot") setSession(message.sessionState);
+      if (message.type === "error") setError(message.errors?.[0]?.message || "Server rejected the request.");
+    };
+    setSocket(next);
+  };
+  const sharedPlayer = session?.players.find(player => player.clientId === clientId);
+  const sharedResources = sharedPlayer ? resources.map(resource => ({ ...resource, amount: sharedPlayer.resources[resource.name as keyof typeof sharedPlayer.resources].amount, production: sharedPlayer.resources[resource.name as keyof typeof sharedPlayer.resources].production })) : resources;
+  const multiplayerAction = (type: string, values: Record<string, unknown>) => session && send({ type, sessionId: session.sessionId, clientId, actionId: id(), expectedRevision: session.revision, ...values });
+  const leaveGame = () => {
+    if (session) send({ type: "leaveSession", sessionId: session.sessionId, clientId });
+    socket?.close(); setSocket(null); setSession(null); setError(null);
+  };
 
   useEffect(() => {
     const data = JSON.stringify({ resources, tr });
@@ -61,6 +99,8 @@ function App() {
   const handleAdd = (id: string) => {
     const delta = deltaValues[id] || 0;
     if (delta <= 0) return;
+    const resource = sharedResources.find(item => item.id === id);
+    if (session && resource) { multiplayerAction("updateResource", { resourceId: resource.name, amount: delta, operation: "add" }); setDeltaValues({ ...deltaValues, [id]: 0 }); return; }
     saveState();
     setResources(prev =>
       prev.map(r => r.id === id ? { ...r, amount: r.amount + delta } : r)
@@ -69,7 +109,7 @@ function App() {
   };
 
   const handleSubtract = (id: string) => {
-    const resource = resources.find(r => r.id === id);
+    const resource = sharedResources.find(r => r.id === id);
     const delta = deltaValues[id] || 0;
     if (delta <= 0) return;
     if (resource && delta > resource.amount) {
@@ -77,6 +117,7 @@ function App() {
       setTimeout(() => setError(null), 2000);
       return;
     }
+    if (session) { multiplayerAction("updateResource", { resourceId: resource!.name, amount: resource!.amount - delta, operation: "set" }); setDeltaValues({ ...deltaValues, [id]: 0 }); return; }
     saveState();
     setResources(prev =>
       prev.map(r => r.id === id ? { ...r, amount: r.amount - delta } : r)
@@ -85,6 +126,7 @@ function App() {
   };
 
   const handleProduction = () => {
+    if (session) { multiplayerAction("runProduction", {}); return; }
     saveState();
     let newResources = resources.map(resource => ({ ...resource }));
     const energy = newResources.find(r => r.isEnergy);
@@ -101,6 +143,7 @@ function App() {
   };
 
   const handleReset = () => {
+    if (session) { multiplayerAction("resetPlayer", {}); return; }
     saveState();
     setResources(resources.map(r => ({ ...r, amount: 0, production: 0 })));
     setTr(20);
@@ -127,15 +170,18 @@ function App() {
   };
 
   const handleTRChange = (delta: number) => {
-    const nextTR = Math.max(0, Math.min(tr + delta, 100));
-    if (nextTR === tr) return;
+    const currentTR = sharedPlayer?.tr ?? tr;
+    const nextTR = Math.max(0, Math.min(currentTR + delta, 100));
+    if (nextTR === currentTR) return;
+    if (session) { multiplayerAction("updateTR", { tr: nextTR }); return; }
     saveState();
     setTr(nextTR);
   };
 
   const handleProductionChange = (id: string, value: number) => {
-    const resource = resources.find(item => item.id === id);
+    const resource = sharedResources.find(item => item.id === id);
     if (!resource || resource.production === value) return;
+    if (session) { multiplayerAction("updateProduction", { resourceId: resource.name, production: value }); return; }
     saveState();
     setResources(previous =>
       previous.map(item => item.id === id ? { ...item, production: value } : item)
@@ -144,6 +190,15 @@ function App() {
 
   return (
     <div style={{ padding: 16, maxWidth: 600, margin: "0 auto" }}>
+      <section style={{ border: "1px solid #ccc", borderRadius: 8, padding: 12, marginBottom: 16 }}>
+        <strong>Local multiplayer</strong>
+        <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+          <input aria-label="Server URL" value={serverUrl} onChange={e => setServerUrl(e.target.value)} placeholder="ws://192.168.x.x:8080/ws" />
+          <input aria-label="Player name" value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Your name" maxLength={20} />
+          {!session && <><button onClick={() => connect(connection => connection.send(JSON.stringify({ type: "createSession", protocolVersion: "v1", requestId: id() })))}>Create game</button><input aria-label="Session ID" value={joinSessionId} onChange={e => setJoinSessionId(e.target.value)} placeholder="Session ID" /><input aria-label="Join code" value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())} placeholder="Join code" maxLength={6} /><button onClick={() => connect(connection => connection.send(JSON.stringify({ type: "joinSession", protocolVersion: "v1", requestId: id(), sessionId: joinSessionId, joinCode, clientId, displayName })))}>Join game</button></>}
+          {session && <div>Connected — session ID: <strong>{session.sessionId}</strong> · code: <strong>{session.joinCode}</strong> · revision {session.revision} <button onClick={leaveGame}>Leave game</button></div>}
+        </div>
+      </section>
       <div
         style={{
           display: "flex",
@@ -165,7 +220,7 @@ function App() {
           >
             −
           </button>
-          <span>{tr}</span>
+          <span>{sharedPlayer?.tr ?? tr}</span>
           <button
             onClick={() => handleTRChange(1)}
             aria-label="Increase TR"
@@ -193,7 +248,7 @@ function App() {
           marginTop: 16,
         }}
       >
-        {resources.map(resource => (
+        {sharedResources.map(resource => (
           <ResourceCard
             key={resource.id}
             resource={resource}
@@ -205,6 +260,7 @@ function App() {
           />
         ))}
       </div>
+      {session && <section style={{ marginTop: 20 }}><h3>Other players’ resources</h3>{session.players.filter(player => player.clientId !== clientId).map(player => <div key={player.playerId} style={{ borderTop: "1px solid #ddd", padding: "8px 0" }}><strong>{player.displayName}</strong> {player.connected ? "● online" : "○ offline"} · TR {player.tr}<div>{resourceIds.map(name => `${name}: ${player.resources[name].amount} (${player.resources[name].production >= 0 ? "+" : ""}${player.resources[name].production})`).join(" · ")}</div></div>)}</section>}
     </div>
   );
 }
