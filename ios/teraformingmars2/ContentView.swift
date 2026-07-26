@@ -9,11 +9,25 @@ class GameViewModel {
     var undoStack: [GameSnapshot] = []
     var redoStack: [GameSnapshot] = []
     var deltaValues: [UUID: Int] = [:]
+    var serverURL = "ws://localhost:8080/ws"
+    var displayName = ""
+    var sessionID = ""
+    var joinCode = ""
+    var multiplayerSession: MultiplayerSessionState?
+    var multiplayerError: String?
+    var isMultiplayerConnected = false
+
+    private let clientID: String
+    private let multiplayerClient = LocalMultiplayerClient()
 
     private let gameStateKey = "GameStateKey"
     private let gameVersion = 1
 
+    var clientIdentifier: String { clientID }
+
     init() {
+        clientID = UserDefaults.standard.string(forKey: "MultiplayerClientID") ?? UUID().uuidString.lowercased()
+        UserDefaults.standard.set(clientID, forKey: "MultiplayerClientID")
         if let data = UserDefaults.standard.data(forKey: gameStateKey),
            let migratedData = migrateGameState(from: data, to: gameVersion),
            let state = try? JSONDecoder().decode(GameState.self, from: migratedData) {
@@ -23,6 +37,89 @@ class GameViewModel {
             let initialState = createInitialState()
             self.resources = initialState.resources
             self.tr = initialState.tr
+        }
+        multiplayerClient.onMessage = { [weak self] message in self?.handleMultiplayerMessage(message) }
+        multiplayerClient.onDisconnect = { [weak self] in
+            self?.isMultiplayerConnected = false
+            self?.multiplayerError = "ローカルサーバーとの接続が切断されました。"
+        }
+    }
+
+    func createMultiplayerGame() {
+        guard let url = URL(string: serverURL) else { multiplayerError = "Server URLが正しくありません。"; return }
+        multiplayerError = nil
+        multiplayerClient.connect(to: url)
+        multiplayerClient.send(["type": "createSession", "protocolVersion": "v1", "requestId": UUID().uuidString.lowercased()])
+    }
+
+    func joinMultiplayerGame() {
+        guard let url = URL(string: serverURL), !sessionID.isEmpty, !joinCode.isEmpty, !displayName.trimmingCharacters(in: .whitespaces).isEmpty else {
+            multiplayerError = "Server URL、名前、Session ID、Join codeを入力してください。"
+            return
+        }
+        multiplayerError = nil
+        multiplayerClient.connect(to: url)
+        sendJoin()
+    }
+
+    func leaveMultiplayerGame() {
+        if !sessionID.isEmpty {
+            multiplayerClient.send(baseMessage(type: "leaveSession"))
+        }
+        multiplayerClient.disconnect()
+        multiplayerSession = nil
+        isMultiplayerConnected = false
+        multiplayerError = nil
+    }
+
+    private func sendJoin() {
+        multiplayerClient.send(baseMessage(type: "joinSession", extra: [
+            "sessionId": sessionID, "joinCode": joinCode.uppercased(), "clientId": clientID, "displayName": displayName
+        ]))
+    }
+
+    private func baseMessage(type: String, extra: [String: Any] = [:]) -> [String: Any] {
+        var message: [String: Any] = ["type": type, "protocolVersion": "v1", "requestId": UUID().uuidString.lowercased()]
+        extra.forEach { message[$0.key] = $0.value }
+        return message
+    }
+
+    private func sendAction(type: String, extra: [String: Any] = [:]) {
+        guard let session = multiplayerSession else { return }
+        var values = extra
+        values["sessionId"] = session.sessionId
+        values["clientId"] = clientID
+        values["actionId"] = UUID().uuidString.lowercased()
+        values["expectedRevision"] = session.revision
+        multiplayerClient.send(baseMessage(type: type, extra: values))
+    }
+
+    private func handleMultiplayerMessage(_ message: [String: Any]) {
+        guard let type = message["type"] as? String else { return }
+        if type == "sessionCreated", let id = message["sessionId"] as? String, let code = message["joinCode"] as? String {
+            sessionID = id
+            joinCode = code
+            sendJoin()
+            return
+        }
+        if type == "error" {
+            if let errors = message["errors"] as? [[String: Any]], let first = errors.first,
+               let text = first["message"] as? String { multiplayerError = text }
+            return
+        }
+        if type == "connectionState" { isMultiplayerConnected = true; multiplayerError = nil }
+        guard let stateObject = message["sessionState"],
+              let data = try? JSONSerialization.data(withJSONObject: stateObject),
+              let state = try? JSONDecoder().decode(MultiplayerSessionState.self, from: data) else { return }
+        multiplayerSession = state
+        isMultiplayerConnected = true
+        multiplayerError = nil
+        guard let player = state.players.first(where: { $0.clientId == clientID }) else { return }
+        tr = player.tr
+        resources = resources.map { resource in
+            guard let value = player.resources[resource.name] else { return resource }
+            return Resource(id: resource.id, name: resource.name, amount: value.amount, production: value.production,
+                            isMegaCredit: resource.isMegaCredit, isEnergy: resource.isEnergy, isHeat: resource.isHeat)
         }
     }
 
@@ -35,6 +132,10 @@ class GameViewModel {
 
     func addResource(resourceNamed name: String, delta: Int) {
         guard delta > 0 else { return }
+        if multiplayerSession != nil {
+            sendAction(type: "updateResource", extra: ["resourceId": name, "amount": delta, "operation": "add"])
+            return
+        }
         saveState()
         if let newState = applyAdd(state: GameState(version: gameVersion, resources: resources, tr: tr),
                                    resourceName: name, delta: delta) {
@@ -46,6 +147,11 @@ class GameViewModel {
 
     func subtractResource(resourceNamed name: String, delta: Int) {
         guard delta > 0 else { return }
+        if multiplayerSession != nil {
+            let amount = max(0, (resources.first(where: { $0.name == name })?.amount ?? 0) - delta)
+            sendAction(type: "updateResource", extra: ["resourceId": name, "amount": amount, "operation": "set"])
+            return
+        }
         saveState()
         if let newState = applySubtract(state: GameState(version: gameVersion, resources: resources, tr: tr),
                                         resourceName: name, delta: delta) {
@@ -56,6 +162,7 @@ class GameViewModel {
     }
 
     func executeProduction() {
+        if multiplayerSession != nil { sendAction(type: "runProduction"); return }
         saveState()
         let newState = applyProduction(state: GameState(version: gameVersion, resources: resources, tr: tr))
         resources = newState.resources
@@ -64,6 +171,7 @@ class GameViewModel {
     }
 
     func resetGame() {
+        if multiplayerSession != nil { sendAction(type: "resetPlayer"); return }
         saveState()
         let newState = applyReset(state: GameState(version: gameVersion, resources: resources, tr: tr))
         resources = newState.resources
@@ -77,6 +185,11 @@ class GameViewModel {
         let clampedProduction = max(minimum, min(production, 20))
         guard clampedProduction != resource.production else { return }
 
+        if multiplayerSession != nil {
+            sendAction(type: "updateProduction", extra: ["resourceId": name, "production": clampedProduction])
+            return
+        }
+
         saveState()
         if let newState = applyUpdateProduction(state: GameState(version: gameVersion, resources: resources, tr: tr),
                                                 resourceName: name, newProduction: clampedProduction) {
@@ -87,6 +200,7 @@ class GameViewModel {
     }
 
     func incrementTR() {
+        if multiplayerSession != nil { sendAction(type: "updateTR", extra: ["tr": min(tr + 1, 100)]); return }
         let currentState = GameState(version: gameVersion, resources: resources, tr: tr)
         let newState = applyIncrementTR(state: currentState)
         guard newState.tr != tr else { return }
@@ -96,6 +210,7 @@ class GameViewModel {
     }
 
     func decrementTR() {
+        if multiplayerSession != nil { sendAction(type: "updateTR", extra: ["tr": max(tr - 1, 0)]); return }
         let currentState = GameState(version: gameVersion, resources: resources, tr: tr)
         let newState = applyDecrementTR(state: currentState)
         guard newState.tr != tr else { return }
@@ -142,6 +257,8 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            multiplayerPanel
+
             // Toolbar: Undo/Redo + TR + Buttons
             HStack {
                 Button("↩︎") {
@@ -280,8 +397,66 @@ struct ContentView: View {
                 }
             }
             .padding(.horizontal, 8)
+
+            if let session = viewModel.multiplayerSession {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("他プレイヤーの資源")
+                        .font(.headline)
+                    ForEach(session.players.filter { $0.clientId != viewModel.clientIdentifier }) { player in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(player.displayName) · TR \(player.tr) · \(player.connected ? "オンライン" : "オフライン")")
+                                .font(.subheadline.bold())
+                            Text(player.resources.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value.amount) (+\($0.value.production))" }.joined(separator: " · "))
+                                .font(.caption)
+                        }
+                        .padding(6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.systemGray6))
+                        .cornerRadius(6)
+                    }
+                }
+                .padding(.horizontal)
+            }
         }
         .hideKeyboardOnTap()
+    }
+
+    private var multiplayerPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Local multiplayer").font(.headline)
+            TextField("ws://192.168.x.x:8080/ws", text: $viewModel.serverURL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+            TextField("プレイヤー名", text: $viewModel.displayName)
+                .textFieldStyle(.roundedBorder)
+            if viewModel.multiplayerSession == nil {
+                HStack {
+                    Button("Create game") { viewModel.createMultiplayerGame() }
+                        .buttonStyle(.borderedProminent)
+                    Button("Join game") { viewModel.joinMultiplayerGame() }
+                        .buttonStyle(.bordered)
+                }
+                TextField("Session ID", text: $viewModel.sessionID)
+                    .textInputAutocapitalization(.never)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Join code", text: $viewModel.joinCode)
+                    .textInputAutocapitalization(.characters)
+                    .textFieldStyle(.roundedBorder)
+            } else {
+                HStack {
+                    Text("Session: \(viewModel.sessionID) · Code: \(viewModel.joinCode)")
+                        .font(.caption)
+                    Spacer()
+                    Button("Leave") { viewModel.leaveMultiplayerGame() }
+                        .buttonStyle(.bordered)
+                }
+            }
+            if let error = viewModel.multiplayerError {
+                Text(error).foregroundStyle(.red).font(.caption)
+            }
+        }
+        .padding(.horizontal)
     }
 }
 

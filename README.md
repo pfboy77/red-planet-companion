@@ -111,6 +111,8 @@ Open http://localhost:3000 in your browser.
 open ios/teraformingmars2/teraformingmars2.xcodeproj
 ```
 
+XcodeでiOSアプリを起動した後、画面上部の `Local multiplayer` にサーバーURLとプレイヤー名を入力します。ホストPC上で実行する場合は `ws://<ホストPCのLAN IP>:8080/ws` を指定し、Web版と同じ Session ID / Join code で参加できます。iOS版でも自分の資源操作はサーバーへ送信され、他プレイヤーの資源は画面下部に表示されます。`Leave` でその端末だけ退出できます。
+
 ## Project Goal
 
 This project explores maintainable cross-platform architecture for turn-based strategy game companion tools.
