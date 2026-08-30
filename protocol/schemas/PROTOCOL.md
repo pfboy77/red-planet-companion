@@ -206,6 +206,12 @@ Client leaves the session.
 }
 ```
 
+This is an explicit departure, not a transient disconnect. The server removes
+the bound player, its Friends `clientId` mapping, and any Private resume token.
+If the host leaves, the first remaining player becomes host. If the last player
+leaves, the session is deleted. A later `joinSession` from the same client
+creates a new player identity (and a new token in Private mode).
+
 ### 4.4 Resume Session
 
 Client reconnects to an existing session. Friends mode uses the stable local
@@ -535,6 +541,9 @@ Each error object has:
   included in public session snapshots.
 - A successful `createSession` or `joinSession` binds that WebSocket connection
   to its `sessionId` and server-selected `playerId`.
+- Each player has at most one active WebSocket. A new successful bind for the
+  same session and player replaces the older connection; closing that replaced
+  connection does not mark the player offline.
 - `leaveSession` and every mutation use the bound player. A payload `clientId`
   is ignored and cannot select another player.
 - Friends resume uses the session-scoped mapping from stable `clientId` to
@@ -542,6 +551,8 @@ Each error object has:
 - Private resume tokens are returned only in the direct `sessionCreated` and
   `sessionJoined` responses. They MUST NOT appear in `SessionState`, snapshots,
   player broadcasts, or logs.
+- A transport disconnect keeps the player identity and credential so that
+  `resumeSession` remains possible. Only `leaveSession` removes them.
 
 ---
 

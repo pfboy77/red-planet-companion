@@ -109,8 +109,8 @@ final class GameViewModel {
     @ObservationIgnored private let multiplayerClient: MultiplayerClient
     @ObservationIgnored private let tokenStore: ResumeTokenStore
     @ObservationIgnored private var pendingConnectionRequest: PendingConnectionRequest?
-    @ObservationIgnored private var pendingActions: [PendingMultiplayerAction] = []
-    @ObservationIgnored private var actionInFlight: PendingMultiplayerAction?
+    private var pendingActions: [PendingMultiplayerAction] = []
+    private var actionInFlight: PendingMultiplayerAction?
     @ObservationIgnored private var waitingForFreshSnapshot = false
     @ObservationIgnored private var resumeToken: String?
 
@@ -135,7 +135,7 @@ final class GameViewModel {
         return roomMode == .friends || resumeToken?.isEmpty == false
     }
     var multiplayerControlsEnabled: Bool {
-        gameMode != .multiplayer || isMultiplayerConnected
+        gameMode != .multiplayer || (isMultiplayerConnected && actionInFlight == nil && pendingActions.isEmpty)
     }
     var canUndo: Bool { gameMode != .multiplayer && !undoStack.isEmpty }
     var canRedo: Bool { gameMode != .multiplayer && !redoStack.isEmpty }
@@ -332,6 +332,10 @@ final class GameViewModel {
             multiplayerError = "サーバーに再接続してから操作してください。"
             return
         }
+        guard actionInFlight == nil, pendingActions.isEmpty else {
+            multiplayerError = "前の操作が完了するまでお待ちください。"
+            return
+        }
         pendingActions.append(PendingMultiplayerAction(
             id: UUID().uuidString.lowercased(),
             intent: intent
@@ -350,8 +354,17 @@ final class GameViewModel {
     }
 
     private func transmit(_ action: PendingMultiplayerAction) {
-        guard let session = multiplayerSession, let player = multiplayerPlayer else { return }
-        var values = values(for: action.intent)
+        guard let session = multiplayerSession, let player = multiplayerPlayer else {
+            actionInFlight = nil
+            multiplayerError = "プレイヤーの最新状態を確認できません。再接続してください。"
+            return
+        }
+        guard var values = values(for: action.intent) else {
+            actionInFlight = nil
+            multiplayerError = "現在の状態ではこの操作を実行できません。"
+            sendNextActionIfPossible()
+            return
+        }
         values["sessionId"] = session.sessionId
         values["actionId"] = action.id
         values["expectedRevision"] = player.revision
@@ -364,17 +377,18 @@ final class GameViewModel {
         }
     }
 
-    private func values(for intent: MultiplayerActionIntent) -> [String: Any] {
+    private func values(for intent: MultiplayerActionIntent) -> [String: Any]? {
         switch intent {
         case let .changeResource(name, delta, adding):
-            let currentAmount = resources.first(where: { $0.name == name })?.amount ?? 0
+            guard let resource = resources.first(where: { $0.name == name }),
+                  let mutation = validatedResourceMutation(currentAmount: resource.amount, delta: delta, adding: adding) else { return nil }
             return [
                 "resourceId": name,
-                "amount": adding ? delta : max(0, currentAmount - delta),
-                "operation": adding ? "add" : "set",
+                "amount": mutation.amount,
+                "operation": mutation.operation,
             ]
         case let .changeProduction(name, delta):
-            guard let resource = resources.first(where: { $0.name == name }) else { return [:] }
+            guard let resource = resources.first(where: { $0.name == name }) else { return nil }
             let minimum = resource.isMegaCredit ? -5 : 0
             return [
                 "resourceId": name,

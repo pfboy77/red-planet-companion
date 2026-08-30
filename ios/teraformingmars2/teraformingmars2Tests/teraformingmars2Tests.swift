@@ -71,20 +71,31 @@ struct GameReducerTests {
 
     @Test func subtractResource() {
         var state = createInitialState()
+        state.resources[state.resources.firstIndex { $0.name == "Plants" }!].amount = 3
         if let newState = applySubtract(state: state, resourceName: "Plants", delta: 2) {
             state = newState
             let plants = state.resources.first { $0.name == "Plants" }!
-            #expect(plants.amount == 0)
+            #expect(plants.amount == 1)
         }
     }
 
-    @Test func subtractResourceCannotGoBelowZero() {
+    @Test func subtractResourceRejectsMoreThanAvailable() {
         var state = createInitialState()
-        if let newState = applySubtract(state: state, resourceName: "Heat", delta: 99) {
-            state = newState
-            let heat = state.resources.first { $0.name == "Heat" }!
-            #expect(heat.amount == 0)
-        }
+        state.resources[state.resources.firstIndex { $0.name == "Heat" }!].amount = 3
+
+        let result = applySubtract(state: state, resourceName: "Heat", delta: 99)
+
+        #expect(result == nil)
+        #expect(state.resources.first { $0.name == "Heat" }!.amount == 3)
+    }
+
+    @Test func multiplayerSubtractMutationRejectsMoreThanLatestAmount() {
+        let rejected = validatedResourceMutation(currentAmount: 2, delta: 3, adding: false)
+        let accepted = validatedResourceMutation(currentAmount: 5, delta: 3, adding: false)
+
+        #expect(rejected == nil)
+        #expect(accepted?.amount == 2)
+        #expect(accepted?.operation == "set")
     }
 
     @Test func productionTransfersEnergyToHeat() {
@@ -173,6 +184,7 @@ struct GameReducerTests {
     @Test func undoRedoCycle() {
         var state = createInitialState()
         var undoStack: [GameSnapshot] = []
+        var redoStack: [GameSnapshot] = []
 
         // Snapshot current
         undoStack = pushSnapshot(to: &undoStack, state: state)
@@ -183,9 +195,15 @@ struct GameReducerTests {
         }
 
         // Undo
-        let restored = popUndo(from: &undoStack)
-        #expect(restored != nil)
-        #expect(restored!.resources[0].amount == 0) // MC should be back to initial
+        let changed = state
+        let restored = popUndo(from: &undoStack)!
+        redoStack = pushSnapshot(to: &redoStack, state: changed)
+        state = restored
+        #expect(state.resources.first { $0.name == "Steel" }!.amount == 0)
+
+        let redone = popRedo(from: &redoStack)!
+        state = redone
+        #expect(state.resources.first { $0.name == "Steel" }!.amount == 10)
     }
 
     @Test func gameStateCodable() {
@@ -344,31 +362,39 @@ struct ViewModelTests {
         #expect(vm.multiplayerError != nil)
     }
 
-    @Test func multiplayerActionsAreSerializedAgainstUpdatedRevision() {
+    @Test func multiplayerSubtractIsBlockedInFlightAndRevalidatedAfterAcceptance() {
         let defaults = isolatedDefaults()
         let client = FakeMultiplayerClient()
         let vm = connectedViewModel(defaults: defaults, client: client, multiplayerTR: 20)
+        client.deliver(["type": "stateSnapshot", "sessionState": sessionObject(revision: 1, playerRevision: 0, tr: 20, mcAmount: 5)])
         let baselineCount = client.sentMessages.count
 
-        vm.incrementTR()
-        vm.incrementTR()
+        vm.subtractResource(resourceNamed: "MC", delta: 3)
 
         #expect(client.sentMessages.count == baselineCount + 1)
         let firstAction = client.sentMessages.last!
         #expect(firstAction["expectedRevision"] as? Int == 0)
-        #expect(firstAction["tr"] as? Int == 21)
+        #expect(firstAction["amount"] as? Int == 2)
+        #expect(!vm.multiplayerControlsEnabled)
+
+        vm.subtractResource(resourceNamed: "MC", delta: 3)
+        #expect(client.sentMessages.count == baselineCount + 1)
 
         client.deliver(actionAcceptedMessage(
             actionID: firstAction["actionId"] as! String,
-            revision: 1,
+            revision: 2,
             playerRevision: 1,
-            tr: 21
+            tr: 20,
+            mcAmount: 2
         ))
 
-        #expect(client.sentMessages.count == baselineCount + 2)
-        let secondAction = client.sentMessages.last!
-        #expect(secondAction["expectedRevision"] as? Int == 1)
-        #expect(secondAction["tr"] as? Int == 22)
+        #expect(vm.multiplayerControlsEnabled)
+        #expect(vm.resources.first { $0.name == "MC" }?.amount == 2)
+
+        vm.subtractResource(resourceNamed: "MC", delta: 3)
+        #expect(client.sentMessages.count == baselineCount + 1)
+        #expect(vm.resources.first { $0.name == "MC" }?.amount == 2)
+        #expect(vm.multiplayerError != nil)
     }
 
     @Test func staleActionIsNotRetriedAfterFreshSnapshot() {
@@ -444,13 +470,13 @@ struct ViewModelTests {
         return vm
     }
 
-    private func actionAcceptedMessage(actionID: String, revision: Int, playerRevision: Int, tr: Int) -> [String: Any] {
+    private func actionAcceptedMessage(actionID: String, revision: Int, playerRevision: Int, tr: Int, mcAmount: Int = 0) -> [String: Any] {
         [
             "type": "actionAccepted",
             "actionId": actionID,
             "revision": revision,
             "playerRevision": playerRevision,
-            "sessionState": sessionObject(revision: revision, playerRevision: playerRevision, tr: tr),
+            "sessionState": sessionObject(revision: revision, playerRevision: playerRevision, tr: tr, mcAmount: mcAmount),
         ]
     }
 

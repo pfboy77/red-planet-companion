@@ -28,9 +28,16 @@ func applySubtract(state: GameState, resourceName: String, delta: Int) -> GameSt
     guard delta > 0 else { return nil }
     var resources = state.resources
     guard let index = resources.firstIndex(where: { $0.name == resourceName }) else { return nil }
-    let newAmount = max(0, resources[index].amount - delta)
-    resources[index].amount = newAmount
+    guard delta <= resources[index].amount else { return nil }
+    resources[index].amount -= delta
     return GameState(version: state.version, resources: resources, tr: state.tr)
+}
+
+func validatedResourceMutation(currentAmount: Int, delta: Int, adding: Bool) -> (amount: Int, operation: String)? {
+    guard delta > 0 else { return nil }
+    if adding { return (delta, "add") }
+    guard delta <= currentAmount else { return nil }
+    return (currentAmount - delta, "set")
 }
 
 // Production phase

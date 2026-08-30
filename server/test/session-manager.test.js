@@ -83,6 +83,71 @@ test("disconnect marks only the bound player offline", () => {
   assert.equal(result.player.resources.MC.amount, 0);
 });
 
+for (const roomMode of ["friends", "private"]) {
+  test(`${roomMode} explicit leave removes identity and permits a fresh join`, () => {
+    const manager = new SessionManager();
+    const { state } = createRoom(manager, roomMode);
+    const clientId = randomUUID();
+    const joined = manager.join({ sessionId: state.sessionId, joinCode: state.joinCode, clientId, displayName: "Ben" });
+    const oldPlayerId = joined.player.playerId;
+    const oldToken = joined.resumeToken;
+
+    const left = manager.leave(state.sessionId, oldPlayerId);
+    const internal = manager.sessions.get(state.sessionId);
+    assert.equal(left.player.playerId, oldPlayerId);
+    assert.equal(internal.state.players.some((player) => player.playerId === oldPlayerId), false);
+    assert.equal(internal.clientPlayers.has(clientId), false);
+    assert.equal(internal.credentials.has(oldPlayerId), false);
+
+    const rejoined = manager.join({ sessionId: state.sessionId, joinCode: state.joinCode, clientId, displayName: "Ben again" });
+    assert.equal(rejoined.error, undefined);
+    assert.notEqual(rejoined.player.playerId, oldPlayerId);
+    assert.equal(rejoined.rejoined, false);
+    if (roomMode === "private") {
+      assert.match(rejoined.resumeToken, /^[A-Za-z0-9_-]{32,256}$/);
+      assert.notEqual(rejoined.resumeToken, oldToken);
+    } else assert.equal(rejoined.resumeToken, undefined);
+  });
+}
+
+test("host leave transfers ownership to the first remaining player", () => {
+  const manager = new SessionManager();
+  const { state, player: host } = createRoom(manager);
+  const joined = manager.join({ sessionId: state.sessionId, joinCode: state.joinCode, clientId: randomUUID(), displayName: "Ben" });
+
+  const result = manager.leave(state.sessionId, host.playerId);
+
+  assert.equal(result.state.hostPlayerId, joined.player.playerId);
+  assert.deepEqual(result.state.players.map((player) => player.playerId), [joined.player.playerId]);
+});
+
+test("last player leave deletes the session and all resume paths", () => {
+  const manager = new SessionManager();
+  const { state, player, clientId, created } = createRoom(manager, "private");
+
+  const result = manager.leave(state.sessionId, player.playerId);
+
+  assert.equal(result.sessionDeleted, true);
+  assert.equal(manager.sessions.has(state.sessionId), false);
+  assert.equal(manager.resume({ sessionId: state.sessionId, playerId: player.playerId, resumeToken: created.resumeToken }).error.code, "SESSION_NOT_FOUND");
+  assert.equal(manager.join({ sessionId: state.sessionId, joinCode: state.joinCode, clientId, displayName: "Ada" }).error.code, "SESSION_NOT_FOUND");
+});
+
+test("explicit leave releases session capacity", () => {
+  const manager = new SessionManager();
+  const { state } = createRoom(manager);
+  for (let index = 1; index < 10; index += 1) {
+    manager.join({ sessionId: state.sessionId, joinCode: state.joinCode, clientId: randomUUID(), displayName: `P${index}` });
+  }
+  assert.equal(state.players.length, 10);
+  manager.leave(state.sessionId, state.players[5].playerId);
+
+  const replacement = manager.join({ sessionId: state.sessionId, joinCode: state.joinCode, clientId: randomUUID(), displayName: "Replacement" });
+
+  assert.equal(replacement.error, undefined);
+  assert.equal(state.players.length, 10);
+});
+
 test("independent players do not conflict on session revision", () => {
   const manager = new SessionManager();
   const { state, player: ada } = createRoom(manager);

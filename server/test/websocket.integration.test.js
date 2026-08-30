@@ -61,6 +61,14 @@ async function connect(url, observed) {
   return { socket, next };
 }
 
+async function waitFor(predicate, message) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(message);
+}
+
 test("actual WebSockets enforce binding, validate schema, broadcast, and disconnect", async (context) => {
   const app = await startServer();
   context.after(() => stopServer(app));
@@ -161,3 +169,100 @@ test("private resume succeeds only with the automatically issued token", async (
   const snapshot = await resumed.next((message) => message.type === "stateSnapshot");
   assert.equal(snapshot.sessionState.players.find((player) => player.playerId === created.playerId).connected, true);
 });
+
+for (const roomMode of ["friends", "private"]) {
+  test(`${roomMode} keeps the replacement socket active until it closes`, async (context) => {
+    const app = await startServer();
+    context.after(() => stopServer(app));
+    const observed = new Set();
+    const clientId = randomUUID();
+    const first = await connect(app.url, observed);
+    first.socket.send(JSON.stringify(request("createSession", { clientId, displayName: "Ada", roomMode })));
+    const created = await first.next((message) => message.type === "sessionCreated");
+    const firstClosed = once(first.socket, "close");
+
+    const replacement = await connect(app.url, observed);
+    const identity = roomMode === "private"
+      ? { playerId: created.playerId, resumeToken: created.resumeToken }
+      : { clientId };
+    replacement.socket.send(JSON.stringify(request("resumeSession", { sessionId: created.sessionId, ...identity })));
+    const resumed = await replacement.next((message) => message.type === "stateSnapshot");
+    await firstClosed;
+
+    assert.equal(resumed.sessionState.players.find((player) => player.playerId === created.playerId).connected, true);
+    assert.equal(app.manager.sessions.get(created.sessionId).state.players[0].connected, true);
+
+    const actionId = randomUUID();
+    replacement.socket.send(JSON.stringify(request("updateTR", {
+      sessionId: created.sessionId, actionId, expectedRevision: 0, tr: 21,
+    })));
+    const accepted = await replacement.next((message) => message.type === "actionAccepted" && message.actionId === actionId);
+    assert.equal(accepted.sessionState.players[0].tr, 21);
+
+    replacement.socket.terminate();
+    await once(replacement.socket, "close");
+    await waitFor(
+      () => app.manager.sessions.get(created.sessionId).state.players[0].connected === false,
+      "active replacement socket did not mark the player offline",
+    );
+  });
+
+  test(`${roomMode} explicit leave permits the same client to join as a new player`, async (context) => {
+    const app = await startServer();
+    context.after(() => stopServer(app));
+    const observed = new Set();
+    const host = await connect(app.url, observed);
+    host.socket.send(JSON.stringify(request("createSession", { clientId: randomUUID(), displayName: "Host", roomMode })));
+    const created = await host.next((message) => message.type === "sessionCreated");
+    const guestClientId = randomUUID();
+    let guest = await connect(app.url, observed);
+    guest.socket.send(JSON.stringify(request("joinSession", {
+      sessionId: created.sessionId, joinCode: created.joinCode, clientId: guestClientId, displayName: "Guest",
+    })));
+    const joined = await guest.next((message) => message.type === "sessionJoined");
+    await host.next((message) => message.type === "playerJoined" && message.playerId === joined.playerId);
+    const oldToken = joined.resumeToken;
+
+    if (roomMode === "private") {
+      for (let cycle = 0; cycle < 2; cycle += 1) {
+        guest.socket.terminate();
+        await once(guest.socket, "close");
+        await host.next((message) => message.type === "stateSnapshot"
+          && message.sessionState.players.some((player) => player.playerId === joined.playerId && !player.connected));
+        guest = await connect(app.url, observed);
+        guest.socket.send(JSON.stringify(request("resumeSession", {
+          sessionId: created.sessionId, playerId: joined.playerId, resumeToken: oldToken,
+        })));
+        const resumed = await guest.next((message) => message.type === "stateSnapshot"
+          && message.sessionState.players.some((player) => player.playerId === joined.playerId && player.connected));
+        assert.equal(resumed.sessionState.players.find((player) => player.playerId === joined.playerId).connected, true);
+      }
+    }
+
+    guest.socket.send(JSON.stringify(request("leaveSession", { sessionId: created.sessionId })));
+    await host.next((message) => message.type === "playerLeft" && message.playerId === joined.playerId);
+    const afterLeave = await host.next((message) => message.type === "stateSnapshot"
+      && !message.sessionState.players.some((player) => player.playerId === joined.playerId));
+    assert.equal(afterLeave.sessionState.players.length, 1);
+
+    if (roomMode === "private") {
+      const staleResume = await connect(app.url, observed);
+      staleResume.socket.send(JSON.stringify(request("resumeSession", {
+        sessionId: created.sessionId, playerId: joined.playerId, resumeToken: oldToken,
+      })));
+      assert.equal((await staleResume.next((message) => message.type === "error")).errors[0].code, "AUTHENTICATION_FAILED");
+      staleResume.socket.close();
+    }
+
+    const fresh = await connect(app.url, observed);
+    fresh.socket.send(JSON.stringify(request("joinSession", {
+      sessionId: created.sessionId, joinCode: created.joinCode, clientId: guestClientId, displayName: "Guest again",
+    })));
+    const rejoined = await fresh.next((message) => message.type === "sessionJoined");
+    assert.notEqual(rejoined.playerId, joined.playerId);
+    if (roomMode === "private") {
+      assert.match(rejoined.resumeToken, /^[A-Za-z0-9_-]{32,256}$/);
+      assert.notEqual(rejoined.resumeToken, oldToken);
+    } else assert.equal("resumeToken" in rejoined, false);
+  });
+}

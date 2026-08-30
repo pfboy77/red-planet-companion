@@ -1,7 +1,7 @@
 import ResourceCard from "./components/ResourceCard";
 import { Resource, GameState } from "./types";
 import React, { useState, useEffect, useRef } from "react";
-import { clearResumeCredentials, ConnectionState, id, readResumeCredentials, resourceIds, ResumeCredentials, RoomMode, SessionState, writeResumeCredentials } from "./multiplayer";
+import { clearResumeCredentials, ConnectionState, id, readResumeCredentials, resourceIds, ResumeCredentials, RoomMode, SessionState, validateWebSocketUrl, writeResumeCredentials } from "./multiplayer";
 import { createInitialResources } from "./game/model";
 import { changeResource, resetGame, runProduction } from "./game/reducer";
 
@@ -82,9 +82,21 @@ function App() {
     socketRef.current = null;
   };
   const openConnection = (url: string, afterOpen?: (connection: WebSocket) => void, resumeCredentials?: ResumeCredentials) => {
+    if (!validateWebSocketUrl(url)) {
+      setConnectionState("disconnected");
+      setError("Enter a valid WebSocket URL beginning with ws:// or wss://.");
+      return;
+    }
     closeCurrentSocket();
     setConnectionState(resumeCredentials ? "reconnecting" : "connecting");
-    const next = new WebSocket(url);
+    let next: WebSocket;
+    try {
+      next = new WebSocket(url);
+    } catch {
+      setConnectionState("disconnected");
+      setError("Could not connect to the local server. Check the Server URL.");
+      return;
+    }
     socketRef.current = next;
     next.onopen = () => {
       setConnectionState("joining");

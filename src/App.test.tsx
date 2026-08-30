@@ -228,3 +228,62 @@ test('friends mode needs no token and mutations use the bound player revision', 
     global.WebSocket = originalWebSocket;
   }
 });
+
+test.each(['', 'abc', 'http://example.com', 'ws://[invalid'])('invalid Server URL %p never constructs a WebSocket', value => {
+  const originalWebSocket = global.WebSocket;
+  const constructor = jest.fn();
+  global.WebSocket = constructor as unknown as typeof WebSocket;
+
+  try {
+    render(<App />);
+    fireEvent.change(screen.getByLabelText('Player name'), { target: { value: 'Ada' } });
+    fireEvent.change(screen.getByLabelText('Server URL'), { target: { value } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create game' }));
+
+    expect(constructor).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Connection status')).toHaveTextContent('Disconnected');
+    expect(screen.getByText(/valid WebSocket URL/)).toBeInTheDocument();
+  } finally {
+    global.WebSocket = originalWebSocket;
+  }
+});
+
+test.each(['ws://localhost:8080/ws', 'wss://example.com/ws'])('valid Server URL %p constructs a WebSocket', value => {
+  const originalWebSocket = global.WebSocket;
+  const constructor = jest.fn();
+  class MockWebSocket {
+    close = jest.fn();
+    constructor(readonly url: string) { constructor(url); }
+  }
+  global.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+  try {
+    render(<App />);
+    fireEvent.change(screen.getByLabelText('Player name'), { target: { value: 'Ada' } });
+    fireEvent.change(screen.getByLabelText('Server URL'), { target: { value } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create game' }));
+
+    expect(constructor).toHaveBeenCalledWith(value);
+    expect(screen.getByLabelText('Connection status')).toHaveTextContent('Connecting');
+  } finally {
+    global.WebSocket = originalWebSocket;
+  }
+});
+
+test('a synchronous WebSocket constructor failure returns to disconnected', () => {
+  const originalWebSocket = global.WebSocket;
+  const constructor = jest.fn(() => { throw new Error('unsupported URL'); });
+  global.WebSocket = constructor as unknown as typeof WebSocket;
+
+  try {
+    render(<App />);
+    fireEvent.change(screen.getByLabelText('Player name'), { target: { value: 'Ada' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create game' }));
+
+    expect(constructor).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('Connection status')).toHaveTextContent('Disconnected');
+    expect(screen.getByText(/Could not connect/)).toBeInTheDocument();
+  } finally {
+    global.WebSocket = originalWebSocket;
+  }
+});

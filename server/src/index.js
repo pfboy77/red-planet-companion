@@ -34,10 +34,19 @@ export function createLocalServer({ manager = new SessionManager() } = {}) {
     peer.sessionId = result.state.sessionId;
     peer.playerId = result.player.playerId;
     peer.clientId = clientId;
+    peer.replaced = false;
+    for (const existingPeer of peers) {
+      if (existingPeer === peer
+        || existingPeer.sessionId !== peer.sessionId
+        || existingPeer.playerId !== peer.playerId) continue;
+      existingPeer.replaced = true;
+      existingPeer.socket.close(1000, "Connection replaced");
+    }
   };
   const isUUID = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 
   const handle = (peer, message) => {
+    if (peer.replaced) return undefined;
     if (!validateClientMessage(message)) {
       const validationError = formatClientMessageValidationError();
       if (mutationTypes.has(message?.type) && isUUID(message.actionId)) return rejectAction(peer, message.actionId, validationError);
@@ -87,11 +96,11 @@ export function createLocalServer({ manager = new SessionManager() } = {}) {
     if (message.type === "leaveSession") {
       const authorizationError = peerAuthorizationError(peer, message);
       if (authorizationError) return reject(peer, authorizationError);
-      const result = manager.disconnect(message.sessionId, peer.playerId);
+      const result = manager.leave(message.sessionId, peer.playerId);
       peer.sessionId = undefined;
       peer.playerId = undefined;
       peer.clientId = undefined;
-      if (result) {
+      if (result?.state) {
         broadcast(result.state, { type: "playerLeft", playerId: result.player.playerId, displayName: result.player.displayName, playerCount: result.state.players.length });
         broadcast(result.state);
       }
@@ -146,6 +155,7 @@ export function createLocalServer({ manager = new SessionManager() } = {}) {
     });
     socket.on("close", () => {
       peers.delete(peer);
+      if (peer.replaced) return;
       const result = manager.disconnect(peer.sessionId, peer.playerId);
       if (result) {
         broadcast(result.state, { type: "playerLeft", playerId: result.player.playerId, displayName: result.player.displayName, playerCount: result.state.players.length });

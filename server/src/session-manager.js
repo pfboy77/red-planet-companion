@@ -94,6 +94,29 @@ export class SessionManager {
     return { state: session.state, player };
   }
 
+  leave(sessionId, playerId) {
+    const session = this.sessions.get(sessionId);
+    const playerIndex = session?.state.players.findIndex((player) => player.playerId === playerId) ?? -1;
+    if (!session || playerIndex < 0) return undefined;
+
+    const [player] = session.state.players.splice(playerIndex, 1);
+    for (const [clientId, mappedPlayerId] of session.clientPlayers) {
+      if (mappedPlayerId === playerId) session.clientPlayers.delete(clientId);
+    }
+    session.credentials.delete(playerId);
+    for (const [actionId, action] of session.actions) {
+      if (action.playerId === playerId) session.actions.delete(actionId);
+    }
+
+    if (session.state.players.length === 0) {
+      this.sessions.delete(sessionId);
+      return { player, sessionDeleted: true };
+    }
+    if (session.state.hostPlayerId === playerId) session.state.hostPlayerId = session.state.players[0].playerId;
+    this.touchSession(session);
+    return { state: session.state, player, sessionDeleted: false };
+  }
+
   mutate(message, authenticatedPlayerId) {
     const session = this.sessions.get(message.sessionId);
     if (!session) return { error: error("SESSION_NOT_FOUND", "Session does not exist") };
