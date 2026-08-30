@@ -1,8 +1,8 @@
 # Red Planet Companion — Common Communication Protocol
 
-**Version**: v1.2.0
+**Version**: v1.3.0
 **Created**: 2026-07-13
-**Updated**: 2026-08-30
+**Updated**: 2026-08-31
 **Applicable to**: iOS (SwiftUI) and Web (React/TypeScript)
 
 ---
@@ -388,7 +388,28 @@ requesting connection. It MUST NOT be copied into `sessionState`.
 `resumeToken` is present only for Private rooms. It belongs to the joining player and is delivered only on this
 requesting connection. It MUST NOT be broadcast to other players.
 
-### 5.3 State Snapshot
+### 5.3 Session Left
+
+Sent directly to the leaving client after the server has removed its player
+identity and reconnect credential.
+
+```json
+{
+  "type": "sessionLeft",
+  "protocolVersion": "v1",
+  "timestamp": "2026-08-31T00:00:00.000Z",
+  "sessionId": "uuid-here",
+  "playerId": "uuid-here",
+  "sessionDeleted": false
+}
+```
+
+`sessionDeleted` is `true` when the leaving player was the final player. Clients
+MUST keep local resume credentials and the WebSocket open until this acknowledgement
+arrives. A pending leave that receives `SESSION_NOT_FOUND` may be treated as already
+complete. A leave timeout MUST preserve credentials for retry.
+
+### 5.4 State Snapshot
 
 ```json
 {
@@ -400,7 +421,7 @@ requesting connection. It MUST NOT be broadcast to other players.
 }
 ```
 
-### 5.4 Action Accepted
+### 5.5 Action Accepted
 
 ```json
 {
@@ -414,7 +435,7 @@ requesting connection. It MUST NOT be broadcast to other players.
 }
 ```
 
-### 5.5 Action Rejected
+### 5.6 Action Rejected
 
 ```json
 {
@@ -434,7 +455,7 @@ It echoes that `actionId` and uses a mutation error code such as
 protocol, and connection requests without an `actionId` use the `error`
 message instead.
 
-### 5.6 Player Joined
+### 5.7 Player Joined
 
 ```json
 {
@@ -447,7 +468,7 @@ message instead.
 }
 ```
 
-### 5.7 Player Left
+### 5.8 Player Left
 
 ```json
 {
@@ -460,7 +481,11 @@ message instead.
 }
 ```
 
-### 5.8 Connection State
+`playerLeft` is broadcast only after explicit `leaveSession` removes a player.
+A transient socket disconnect keeps the player in the session and broadcasts only
+a `stateSnapshot` with `connected: false`.
+
+### 5.9 Connection State
 
 ```json
 {
@@ -474,7 +499,7 @@ message instead.
 
 Possible `state` values: `"connected"`, `"reconnecting"`, `"disconnected"`.
 
-### 5.9 Pong
+### 5.10 Pong
 
 ```json
 {
@@ -484,7 +509,7 @@ Possible `state` values: `"connected"`, `"reconnecting"`, `"disconnected"`.
 }
 ```
 
-### 5.10 Error
+### 5.11 Error
 
 ```json
 {
@@ -544,6 +569,9 @@ Each error object has:
 - Each player has at most one active WebSocket. A new successful bind for the
   same session and player replaces the older connection; closing that replaced
   connection does not mark the player offline.
+- A replaced WebSocket is closed with application close code `4001` and reason
+  `Connection replaced`. Clients MUST suppress automatic reconnect for this code,
+  but may offer an explicit manual takeover action without deleting credentials.
 - `leaveSession` and every mutation use the bound player. A payload `clientId`
   is ignored and cannot select another player.
 - Friends resume uses the session-scoped mapping from stable `clientId` to
@@ -680,9 +708,11 @@ Client            Server
 ### 9.5 Leave Session
 
 ```
-Client            Server
-    |--- leaveSession -------->|
-    |<-- playerLeft -----------|
+Leaving Client       Server       Remaining Clients
+      |--- leaveSession --->|              |
+      |<-- sessionLeft -----|              |
+      |                     |-- playerLeft>|
+      |                     |-- snapshot ->|
 ```
 
 ---
@@ -749,6 +779,7 @@ The following fixture files are provided for schema validation testing:
 | `protocol/fixtures/reset-player.json` | Reset player message |
 | `protocol/fixtures/state-snapshot.json` | State snapshot from server |
 | `protocol/fixtures/session-joined.json` | Join response carrying the private resume token |
+| `protocol/fixtures/session-left.json` | Explicit leave acknowledgement |
 | `protocol/fixtures/session-full-error.json` | Full-session lifecycle error |
 | `protocol/fixtures/authentication-failed-error.json` | Authentication failure error |
 | `protocol/fixtures/stale-revision-error.json` | Stale revision error |

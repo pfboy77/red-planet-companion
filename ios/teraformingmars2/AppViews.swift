@@ -20,8 +20,13 @@ struct HomeView: View {
                     if viewModel.canResumeSession {
                         Button("前回のルームへ再接続") { viewModel.resumeMultiplayerGame() }
                             .buttonStyle(.bordered)
-                            .disabled(viewModel.isConnecting)
+                            .disabled(viewModel.isConnecting || viewModel.isLeavingMultiplayer)
                             .accessibilityIdentifier("resumeRoomButton")
+                        Button(viewModel.isLeavingMultiplayer ? "退出確認中…" : "前回のルームから退出", role: .destructive) {
+                            viewModel.leaveMultiplayerGame()
+                        }
+                        .disabled(viewModel.isLeavingMultiplayer)
+                        .accessibilityIdentifier("leaveSavedRoomButton")
                     }
 
                     connectionForm
@@ -125,7 +130,8 @@ struct SessionInfoCard: View {
                     .disabled(viewModel.isConnecting)
                     .accessibilityIdentifier("resumeRoomButton")
             }
-            Button("退出", role: .destructive) { viewModel.leaveMultiplayerGame() }
+            Button(viewModel.isLeavingMultiplayer ? "退出確認中…" : "退出", role: .destructive) { viewModel.leaveMultiplayerGame() }
+                .disabled(viewModel.isLeavingMultiplayer)
                 .accessibilityIdentifier("leaveRoomButton")
         }
         .padding().frame(maxWidth: .infinity, alignment: .leading)

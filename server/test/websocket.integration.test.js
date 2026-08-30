@@ -6,7 +6,7 @@ import { once } from "node:events";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import { WebSocket } from "ws";
-import { createLocalServer } from "../src/index.js";
+import { CONNECTION_REPLACED_CLOSE_CODE, createLocalServer } from "../src/index.js";
 
 const protocolDirectory = new URL("../../protocol/schemas/", import.meta.url);
 const serverSchema = JSON.parse(readFileSync(new URL("server-message.schema.json", protocolDirectory), "utf8"));
@@ -138,11 +138,11 @@ test("actual WebSockets enforce binding, validate schema, broadcast, and disconn
 
   ben.socket.terminate();
   await once(ben.socket, "close");
-  await ada.next((message) => message.type === "playerLeft" && message.playerId === joined.playerId);
   const offline = await ada.next((message) => message.type === "stateSnapshot" && message.sessionState.players.some((player) => player.playerId === joined.playerId && !player.connected));
   assert.equal(offline.sessionState.players.find((player) => player.playerId === joined.playerId).connected, false);
+  assert.equal(observed.has("playerLeft"), false);
 
-  for (const type of ["connectionState", "sessionCreated", "sessionJoined", "stateSnapshot", "actionAccepted", "actionRejected", "playerJoined", "playerLeft", "error", "pong"]) {
+  for (const type of ["connectionState", "sessionCreated", "sessionJoined", "stateSnapshot", "actionAccepted", "actionRejected", "playerJoined", "error", "pong"]) {
     assert.equal(observed.has(type), true, `missing ${type}`);
   }
 });
@@ -187,8 +187,10 @@ for (const roomMode of ["friends", "private"]) {
       : { clientId };
     replacement.socket.send(JSON.stringify(request("resumeSession", { sessionId: created.sessionId, ...identity })));
     const resumed = await replacement.next((message) => message.type === "stateSnapshot");
-    await firstClosed;
+    const [closeCode, closeReason] = await firstClosed;
 
+    assert.equal(closeCode, CONNECTION_REPLACED_CLOSE_CODE);
+    assert.equal(closeReason.toString(), "Connection replaced");
     assert.equal(resumed.sessionState.players.find((player) => player.playerId === created.playerId).connected, true);
     assert.equal(app.manager.sessions.get(created.sessionId).state.players[0].connected, true);
 
@@ -240,6 +242,10 @@ for (const roomMode of ["friends", "private"]) {
     }
 
     guest.socket.send(JSON.stringify(request("leaveSession", { sessionId: created.sessionId })));
+    const left = await guest.next((message) => message.type === "sessionLeft");
+    assert.equal(left.sessionId, created.sessionId);
+    assert.equal(left.playerId, joined.playerId);
+    assert.equal(left.sessionDeleted, false);
     await host.next((message) => message.type === "playerLeft" && message.playerId === joined.playerId);
     const afterLeave = await host.next((message) => message.type === "stateSnapshot"
       && !message.sessionState.players.some((player) => player.playerId === joined.playerId));
@@ -266,3 +272,22 @@ for (const roomMode of ["friends", "private"]) {
     } else assert.equal("resumeToken" in rejoined, false);
   });
 }
+
+test("last player receives sessionLeft before its session is deleted", async (context) => {
+  const app = await startServer();
+  context.after(() => stopServer(app));
+  const observed = new Set();
+  const player = await connect(app.url, observed);
+  player.socket.send(JSON.stringify(request("createSession", {
+    clientId: randomUUID(), displayName: "Solo host", roomMode: "private",
+  })));
+  const created = await player.next((message) => message.type === "sessionCreated");
+
+  player.socket.send(JSON.stringify(request("leaveSession", { sessionId: created.sessionId })));
+  const left = await player.next((message) => message.type === "sessionLeft");
+
+  assert.equal(left.sessionId, created.sessionId);
+  assert.equal(left.playerId, created.playerId);
+  assert.equal(left.sessionDeleted, true);
+  assert.equal(app.manager.sessions.has(created.sessionId), false);
+});

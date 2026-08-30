@@ -1,6 +1,6 @@
 {
      "name": "mars-protocol",
-     "version": "1.2.0",
+     "version": "1.3.0",
      "description": "Common protocol validation for Red Planet Companion",
      "type": "module",
      "private": true,

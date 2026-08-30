@@ -7,6 +7,7 @@ export type ConnectionState = "disconnected" | "connecting" | "joining" | "conne
 export type SharedPlayer = { playerId: string; displayName: string; connected: boolean; lastSeenAt: string; revision: number; tr: number; resources: Record<ResourceId, { amount: number; production: number }> };
 export type SessionState = { sessionId: string; joinCode: string; roomMode: RoomMode; revision: number; hostPlayerId: string; players: SharedPlayer[] };
 export type ResumeCredentials = { serverUrl: string; sessionId: string; clientId: string; playerId: string; roomMode: RoomMode; resumeToken?: string };
+export const CONNECTION_REPLACED_CLOSE_CODE = 4001;
 
 export function validateWebSocketUrl(value: string): boolean {
   try {

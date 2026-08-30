@@ -100,6 +100,7 @@ final class GameViewModel {
     var multiplayerError: String?
     var isMultiplayerConnected = false
     var isConnecting = false
+    var isLeavingMultiplayer = false
     var connectionState: MultiplayerConnectionState = .disconnected
     var gameMode: GameMode = .none
 
@@ -113,6 +114,11 @@ final class GameViewModel {
     private var actionInFlight: PendingMultiplayerAction?
     @ObservationIgnored private var waitingForFreshSnapshot = false
     @ObservationIgnored private var resumeToken: String?
+    @ObservationIgnored private var leaveAfterReconnect = false
+    @ObservationIgnored private var leaveRequestInFlight = false
+    @ObservationIgnored private var switchToSoloAfterLeave = false
+    @ObservationIgnored private var leaveTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored private let leaveAcknowledgementTimeoutNanoseconds: UInt64
 
     private let gameVersion = 1
 
@@ -135,16 +141,17 @@ final class GameViewModel {
         return roomMode == .friends || resumeToken?.isEmpty == false
     }
     var multiplayerControlsEnabled: Bool {
-        gameMode != .multiplayer || (isMultiplayerConnected && actionInFlight == nil && pendingActions.isEmpty)
+        gameMode != .multiplayer || (isMultiplayerConnected && !isLeavingMultiplayer && actionInFlight == nil && pendingActions.isEmpty)
     }
     var canUndo: Bool { gameMode != .multiplayer && !undoStack.isEmpty }
     var canRedo: Bool { gameMode != .multiplayer && !redoStack.isEmpty }
 
-    init(defaults: UserDefaults = .standard, multiplayerClient: MultiplayerClient? = nil, tokenStore: ResumeTokenStore? = nil) {
+    init(defaults: UserDefaults = .standard, multiplayerClient: MultiplayerClient? = nil, tokenStore: ResumeTokenStore? = nil, leaveAcknowledgementTimeoutNanoseconds: UInt64 = 4_000_000_000) {
         let resolvedTokenStore = tokenStore ?? KeychainResumeTokenStore()
         self.defaults = defaults
         self.multiplayerClient = multiplayerClient ?? LocalMultiplayerClient()
         self.tokenStore = resolvedTokenStore
+        self.leaveAcknowledgementTimeoutNanoseconds = leaveAcknowledgementTimeoutNanoseconds
         clientID = defaults.string(forKey: Keys.clientID) ?? UUID().uuidString.lowercased()
         serverURL = defaults.string(forKey: Keys.serverURL) ?? ""
         displayName = defaults.string(forKey: Keys.displayName) ?? ""
@@ -167,19 +174,27 @@ final class GameViewModel {
         self.multiplayerClient.onMessage = { [weak self] message in self?.handleMultiplayerMessage(message) }
         self.multiplayerClient.onDisconnect = { [weak self] in
             guard let self else { return }
+            self.leaveRequestInFlight = false
             self.isMultiplayerConnected = false
             self.isConnecting = false
             self.connectionState = self.canResumeSession ? .reconnecting : .disconnected
             self.multiplayerSession = nil
             self.pendingConnectionRequest = nil
             self.clearPendingActions()
-            self.multiplayerError = "ローカルサーバーとの接続が切断されました。再接続してください。"
+            if self.isLeavingMultiplayer {
+                self.leaveAfterReconnect = self.canResumeSession
+                self.multiplayerError = "退出確認中に接続が切れました。再接続情報を保持して確認を待ちます。"
+            } else {
+                self.multiplayerError = "ローカルサーバーとの接続が切断されました。再接続してください。"
+            }
         }
     }
 
     func startSoloGame() {
         if multiplayerSession != nil || isMultiplayerConnected || canResumeSession {
+            switchToSoloAfterLeave = true
             leaveMultiplayerGame()
+            return
         }
         multiplayerError = nil
         gameMode = .solo
@@ -206,21 +221,24 @@ final class GameViewModel {
     }
 
     func leaveMultiplayerGame() {
-        if isMultiplayerConnected && !sessionID.isEmpty {
-            multiplayerClient.send(baseMessage(type: "leaveSession", extra: [
-                "sessionId": sessionID,
-            ]))
+        guard !isLeavingMultiplayer else { return }
+        guard canResumeSession else {
+            multiplayerError = "退出を確認するための再接続情報がありません。"
+            switchToSoloAfterLeave = false
+            return
         }
-        multiplayerClient.disconnect()
-        multiplayerSession = nil
-        isMultiplayerConnected = false
-        isConnecting = false
-        connectionState = .disconnected
-        pendingConnectionRequest = nil
-        clearPendingActions()
-        clearActiveSessionCredentials()
-        gameMode = .none
+        isLeavingMultiplayer = true
+        leaveAfterReconnect = !isMultiplayerConnected
+        leaveRequestInFlight = false
         multiplayerError = nil
+        clearPendingActions()
+        startLeaveTimeout()
+        if isMultiplayerConnected {
+            sendLeaveRequest()
+        } else {
+            resumeMultiplayerGame()
+            if !isConnecting { failLeaveAttempt("退出確認のため再接続できませんでした。再接続情報は保持されています。") }
+        }
     }
 
     func handleScenePhase(isActive: Bool) {
@@ -234,6 +252,7 @@ final class GameViewModel {
             connectionState = .disconnected
             pendingConnectionRequest = nil
             clearPendingActions()
+            if isLeavingMultiplayer { leaveAfterReconnect = true }
         }
     }
 
@@ -325,6 +344,57 @@ final class GameViewModel {
         var message: [String: Any] = ["type": type, "protocolVersion": "v1", "requestId": UUID().uuidString.lowercased()]
         extra.forEach { message[$0.key] = $0.value }
         return message
+    }
+
+    private func sendLeaveRequest() {
+        guard isLeavingMultiplayer, !leaveRequestInFlight, isMultiplayerConnected, !sessionID.isEmpty else { return }
+        guard multiplayerClient.send(baseMessage(type: "leaveSession", extra: ["sessionId": sessionID])) else {
+            failLeaveAttempt("退出リクエストを送信できませんでした。再接続情報は保持されています。")
+            return
+        }
+        leaveAfterReconnect = false
+        leaveRequestInFlight = true
+        startLeaveTimeout()
+    }
+
+    private func startLeaveTimeout() {
+        leaveTimeoutTask?.cancel()
+        let timeout = leaveAcknowledgementTimeoutNanoseconds
+        leaveTimeoutTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: timeout) } catch { return }
+            guard let self, self.isLeavingMultiplayer else { return }
+            self.failLeaveAttempt("サーバーから退出確認を受信できませんでした。再接続情報は保持されています。")
+        }
+    }
+
+    private func failLeaveAttempt(_ message: String) {
+        leaveTimeoutTask?.cancel()
+        leaveTimeoutTask = nil
+        isLeavingMultiplayer = false
+        leaveAfterReconnect = false
+        leaveRequestInFlight = false
+        switchToSoloAfterLeave = false
+        multiplayerError = message
+    }
+
+    private func completeLeave() {
+        leaveTimeoutTask?.cancel()
+        leaveTimeoutTask = nil
+        let nextMode: GameMode = switchToSoloAfterLeave ? .solo : .none
+        multiplayerClient.disconnect()
+        multiplayerSession = nil
+        isMultiplayerConnected = false
+        isConnecting = false
+        isLeavingMultiplayer = false
+        connectionState = .disconnected
+        pendingConnectionRequest = nil
+        leaveAfterReconnect = false
+        leaveRequestInFlight = false
+        switchToSoloAfterLeave = false
+        clearPendingActions()
+        clearActiveSessionCredentials()
+        gameMode = nextMode
+        multiplayerError = nil
     }
 
     private func sendAction(_ intent: MultiplayerActionIntent) {
@@ -459,6 +529,12 @@ final class GameViewModel {
             guard let state = decodeSessionState(message["sessionState"]) else { return }
             applyMultiplayerState(state)
             retryStaleActionIfNeeded()
+            if isLeavingMultiplayer && leaveAfterReconnect { sendLeaveRequest() }
+            return
+        case "sessionLeft":
+            guard message["sessionId"] as? String == sessionID,
+                  message["playerId"] as? String == activePlayerID else { return }
+            completeLeave()
             return
         case "actionAccepted":
             guard let state = decodeSessionState(message["sessionState"]) else { return }
@@ -473,10 +549,22 @@ final class GameViewModel {
             handleActionRejected(message)
             return
         case "error":
-            multiplayerError = firstErrorMessage(in: message) ?? "サーバーがリクエストを拒否しました。"
+            let errorMessage = firstErrorMessage(in: message) ?? "サーバーがリクエストを拒否しました。"
+            let code = (message["errors"] as? [[String: Any]])?.first?["code"] as? String
+            if isLeavingMultiplayer {
+                if code == "SESSION_NOT_FOUND" { completeLeave() }
+                else {
+                    isConnecting = false
+                    isMultiplayerConnected = false
+                    connectionState = .disconnected
+                    multiplayerSession = nil
+                    failLeaveAttempt("\(errorMessage) 再接続情報は保持されています。")
+                }
+                return
+            }
+            multiplayerError = errorMessage
             isConnecting = false
-            if let code = (message["errors"] as? [[String: Any]])?.first?["code"] as? String,
-               ["AUTHENTICATION_FAILED", "PLAYER_NOT_FOUND", "SESSION_NOT_FOUND"].contains(code) {
+            if let code, ["AUTHENTICATION_FAILED", "PLAYER_NOT_FOUND", "SESSION_NOT_FOUND"].contains(code) {
                 multiplayerSession = nil
                 isMultiplayerConnected = false
                 connectionState = .disconnected

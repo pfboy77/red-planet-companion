@@ -11,6 +11,9 @@
             "$ref": "#/definitions/sessionJoinedMessage"
         },
         {
+            "$ref": "#/definitions/sessionLeftMessage"
+        },
+        {
             "$ref": "#/definitions/stateSnapshotMessage"
         },
         {
@@ -167,6 +170,36 @@
                     "if": { "required": ["roomMode"], "properties": { "roomMode": { "const": "private" } } },
                     "then": { "required": ["resumeToken"], "properties": { "resumeToken": { "$ref": "#/definitions/resumeToken" } } },
                     "else": { "not": { "required": ["resumeToken"] } }
+                }
+            ]
+        },
+        "sessionLeftMessage": {
+            "allOf": [
+                {
+                    "$ref": "#/definitions/_common"
+                },
+                {
+                    "required": [
+                        "sessionId",
+                        "playerId",
+                        "sessionDeleted"
+                    ],
+                    "properties": {
+                        "type": {
+                            "const": "sessionLeft"
+                        },
+                        "sessionId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        "playerId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        "sessionDeleted": {
+                            "type": "boolean"
+                        }
+                    }
                 }
             ]
         },

@@ -9,6 +9,7 @@ private final class FakeMultiplayerClient: MultiplayerClient {
     var connectedURLs: [URL] = []
     var sentMessages: [[String: Any]] = []
     var isConnected = false
+    var disconnectCallCount = 0
 
     func connect(to url: URL) {
         connectedURLs.append(url)
@@ -23,6 +24,7 @@ private final class FakeMultiplayerClient: MultiplayerClient {
     }
 
     func disconnect() {
+        disconnectCallCount += 1
         isConnected = false
     }
 
@@ -310,10 +312,11 @@ struct ViewModelTests {
         #expect(client.sentMessages[0]["roomMode"] as? String == "friends")
     }
 
-    @Test func leavingMultiplayerRestoresSoloStateAndSendsCompleteLeaveMessage() {
+    @Test func leavingMultiplayerWaitsForAcknowledgementBeforeClearingCredentials() {
         let defaults = isolatedDefaults()
         let client = FakeMultiplayerClient()
-        let vm = GameViewModel(defaults: defaults, multiplayerClient: client)
+        let tokenStore = InMemoryResumeTokenStore()
+        let vm = GameViewModel(defaults: defaults, multiplayerClient: client, tokenStore: tokenStore)
         vm.localGameState.tr = 31
         vm.localGameState.resources[0].amount = 9
         vm.savePersistentState()
@@ -335,17 +338,117 @@ struct ViewModelTests {
 
         vm.leaveMultiplayerGame()
 
-        #expect(vm.gameMode == .none)
-        #expect(vm.tr == 31)
-        #expect(vm.resources[0].amount == 9)
+        #expect(vm.gameMode == .multiplayer)
+        #expect(vm.isLeavingMultiplayer)
         let leave = client.sentMessages.last
         #expect(leave?["type"] as? String == "leaveSession")
         #expect(leave?["sessionId"] as? String == testSessionID)
         #expect(leave?["clientId"] == nil)
+        #expect(vm.canResumeSession)
+        #expect(tokenStore.token == testResumeToken)
+        #expect(client.disconnectCallCount == 0)
+
+        client.deliver([
+            "type": "sessionLeft",
+            "sessionId": testSessionID,
+            "playerId": testPlayerID,
+            "sessionDeleted": true,
+        ])
+
+        #expect(vm.gameMode == .none)
+        #expect(!vm.isLeavingMultiplayer)
+        #expect(vm.tr == 31)
+        #expect(vm.resources[0].amount == 9)
         #expect(!vm.canResumeSession)
+        #expect(tokenStore.token == nil)
+        #expect(client.disconnectCallCount == 1)
         let restored = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: InMemoryResumeTokenStore())
         #expect(restored.tr == 31)
         #expect(restored.resources[0].amount == 9)
+    }
+
+    @Test func offlineLeaveResumesThenLeavesAndWaitsForAcknowledgement() {
+        let defaults = isolatedDefaults()
+        let client = FakeMultiplayerClient()
+        let tokenStore = InMemoryResumeTokenStore()
+        let vm = connectedViewModel(defaults: defaults, client: client, multiplayerTR: 20, tokenStore: tokenStore)
+        client.failConnection()
+        let connectionCount = client.connectedURLs.count
+
+        vm.leaveMultiplayerGame()
+
+        #expect(vm.isLeavingMultiplayer)
+        #expect(client.connectedURLs.count == connectionCount + 1)
+        #expect(tokenStore.token == testResumeToken)
+        client.deliver(["type": "connectionState", "state": "connected"])
+        #expect(client.sentMessages.last?["type"] as? String == "resumeSession")
+
+        client.deliver(["type": "stateSnapshot", "sessionState": sessionObject(revision: 2, playerRevision: 0, tr: 20)])
+        #expect(client.sentMessages.last?["type"] as? String == "leaveSession")
+        #expect(tokenStore.token == testResumeToken)
+        #expect(client.disconnectCallCount == 0)
+
+        client.deliver(["type": "sessionLeft", "sessionId": testSessionID, "playerId": testPlayerID, "sessionDeleted": false])
+        #expect(tokenStore.token == nil)
+        #expect(client.disconnectCallCount == 1)
+        #expect(vm.gameMode == .none)
+    }
+
+    @Test func startSoloWaitsForLeaveAcknowledgement() {
+        let defaults = isolatedDefaults()
+        let client = FakeMultiplayerClient()
+        let vm = connectedViewModel(defaults: defaults, client: client, multiplayerTR: 42)
+
+        vm.startSoloGame()
+
+        #expect(vm.gameMode == .multiplayer)
+        #expect(vm.isLeavingMultiplayer)
+        #expect(client.sentMessages.last?["type"] as? String == "leaveSession")
+        client.deliver(["type": "sessionLeft", "sessionId": testSessionID, "playerId": testPlayerID, "sessionDeleted": true])
+        #expect(vm.gameMode == .solo)
+        #expect(vm.tr == 20)
+    }
+
+    @Test func leaveTimeoutKeepsPrivateCredentials() async {
+        let defaults = isolatedDefaults()
+        let client = FakeMultiplayerClient()
+        let tokenStore = InMemoryResumeTokenStore()
+        let vm = connectedViewModel(
+            defaults: defaults,
+            client: client,
+            multiplayerTR: 20,
+            tokenStore: tokenStore,
+            leaveAcknowledgementTimeoutNanoseconds: 10_000_000
+        )
+
+        vm.leaveMultiplayerGame()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(!vm.isLeavingMultiplayer)
+        #expect(vm.canResumeSession)
+        #expect(tokenStore.token == testResumeToken)
+        #expect(client.disconnectCallCount == 0)
+        #expect(vm.multiplayerError?.contains("保持") == true)
+    }
+
+    @Test func sessionNotFoundDuringOfflineLeaveSafelyClearsCredentials() {
+        let defaults = isolatedDefaults()
+        let client = FakeMultiplayerClient()
+        let tokenStore = InMemoryResumeTokenStore()
+        let vm = connectedViewModel(defaults: defaults, client: client, multiplayerTR: 20, tokenStore: tokenStore)
+        client.failConnection()
+        vm.leaveMultiplayerGame()
+        client.deliver(["type": "connectionState", "state": "connected"])
+
+        client.deliver([
+            "type": "error",
+            "errors": [["code": "SESSION_NOT_FOUND", "message": "Session does not exist"]],
+        ])
+
+        #expect(tokenStore.token == nil)
+        #expect(!vm.canResumeSession)
+        #expect(!vm.isLeavingMultiplayer)
+        #expect(client.disconnectCallCount == 1)
     }
 
     @Test func multiplayerSubtractTooMuchDoesNotSendOrClamp() {
@@ -451,8 +554,19 @@ struct ViewModelTests {
         return defaults
     }
 
-    private func connectedViewModel(defaults: UserDefaults, client: FakeMultiplayerClient, multiplayerTR: Int) -> GameViewModel {
-        let vm = GameViewModel(defaults: defaults, multiplayerClient: client, tokenStore: InMemoryResumeTokenStore())
+    private func connectedViewModel(
+        defaults: UserDefaults,
+        client: FakeMultiplayerClient,
+        multiplayerTR: Int,
+        tokenStore: InMemoryResumeTokenStore = InMemoryResumeTokenStore(),
+        leaveAcknowledgementTimeoutNanoseconds: UInt64 = 4_000_000_000
+    ) -> GameViewModel {
+        let vm = GameViewModel(
+            defaults: defaults,
+            multiplayerClient: client,
+            tokenStore: tokenStore,
+            leaveAcknowledgementTimeoutNanoseconds: leaveAcknowledgementTimeoutNanoseconds
+        )
         vm.serverURL = "ws://192.168.1.20:8080/ws"
         vm.displayName = "Ada"
         vm.roomMode = .private

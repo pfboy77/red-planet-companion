@@ -1,10 +1,50 @@
 import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import App from './App';
+import { CONNECTION_REPLACED_CLOSE_CODE } from './multiplayer';
 
 beforeEach(() => {
   localStorage.clear();
+  LifecycleWebSocket.instances = [];
 });
+
+class LifecycleWebSocket {
+  static OPEN = 1;
+  static instances: LifecycleWebSocket[] = [];
+  readyState = LifecycleWebSocket.OPEN;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
+  send = jest.fn();
+  close = jest.fn();
+  constructor(readonly url: string) { LifecycleWebSocket.instances.push(this); }
+}
+
+const privateSessionState = () => ({
+  protocolVersion: 'v1', sessionId: 'session-id', joinCode: 'ABC234', revision: 0,
+  roomMode: 'private', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), hostPlayerId: 'player-id',
+  players: [{
+    playerId: 'player-id', displayName: 'Ada', connected: true,
+    lastSeenAt: new Date().toISOString(), revision: 0, tr: 20,
+    resources: Object.fromEntries(['MC', 'Steel', 'Titanium', 'Plants', 'Energy', 'Heat'].map(name => [name, { amount: 0, production: 0 }])),
+  }],
+});
+
+function renderConnectedPrivateSession() {
+  render(<App />);
+  fireEvent.change(screen.getByLabelText('Player name'), { target: { value: 'Ada' } });
+  fireEvent.click(screen.getByRole('radio', { name: /Private/ }));
+  fireEvent.click(screen.getByRole('button', { name: 'Create game' }));
+  const socket = LifecycleWebSocket.instances[0];
+  act(() => socket.onopen?.());
+  const createRequest = JSON.parse(socket.send.mock.calls[0][0]);
+  act(() => socket.onmessage?.({ data: JSON.stringify({
+    type: 'sessionCreated', sessionId: 'session-id', joinCode: 'ABC234', playerId: 'player-id', roomMode: 'private',
+    resumeToken: '0123456789abcdef0123456789abcdef', sessionState: privateSessionState(),
+  }) }));
+  return { socket, createRequest };
+}
 
 test('renders the canonical zero-resource initial state', () => {
   render(<App />);
@@ -285,5 +325,172 @@ test('a synchronous WebSocket constructor failure returns to disconnected', () =
     expect(screen.getByText(/Could not connect/)).toBeInTheDocument();
   } finally {
     global.WebSocket = originalWebSocket;
+  }
+});
+
+test('replacement close stops automatic reconnect and preserves credentials', () => {
+  const originalWebSocket = global.WebSocket;
+  jest.useFakeTimers();
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+
+  try {
+    const { socket } = renderConnectedPrivateSession();
+    const credentials = localStorage.getItem('multiplayerResumeCredentials');
+
+    act(() => socket.onclose?.({ code: CONNECTION_REPLACED_CLOSE_CODE }));
+    act(() => jest.advanceTimersByTime(5000));
+
+    expect(LifecycleWebSocket.instances).toHaveLength(1);
+    expect(screen.getByText(/connected in another tab or device/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reconnect here' })).toBeInTheDocument();
+    expect(localStorage.getItem('multiplayerResumeCredentials')).toBe(credentials);
+  } finally {
+    global.WebSocket = originalWebSocket;
+    jest.useRealTimers();
+  }
+});
+
+test('normal disconnect still automatically resumes after one second', () => {
+  const originalWebSocket = global.WebSocket;
+  jest.useFakeTimers();
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+
+  try {
+    const { socket } = renderConnectedPrivateSession();
+    act(() => socket.onclose?.({ code: 1006 }));
+    act(() => jest.advanceTimersByTime(1000));
+
+    expect(LifecycleWebSocket.instances).toHaveLength(2);
+    const resumed = LifecycleWebSocket.instances[1];
+    act(() => resumed.onopen?.());
+    expect(JSON.parse(resumed.send.mock.calls[0][0])).toMatchObject({
+      type: 'resumeSession', sessionId: 'session-id', playerId: 'player-id',
+      resumeToken: '0123456789abcdef0123456789abcdef',
+    });
+  } finally {
+    global.WebSocket = originalWebSocket;
+    jest.useRealTimers();
+  }
+});
+
+test('replacement allows one deliberate manual takeover', () => {
+  const originalWebSocket = global.WebSocket;
+  jest.useFakeTimers();
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+
+  try {
+    const { socket } = renderConnectedPrivateSession();
+    act(() => socket.onclose?.({ code: CONNECTION_REPLACED_CLOSE_CODE }));
+    act(() => jest.advanceTimersByTime(5000));
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect here' }));
+
+    expect(LifecycleWebSocket.instances).toHaveLength(2);
+    const takeover = LifecycleWebSocket.instances[1];
+    act(() => takeover.onopen?.());
+    expect(takeover.send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(takeover.send.mock.calls[0][0])).toMatchObject({ type: 'resumeSession', playerId: 'player-id' });
+  } finally {
+    global.WebSocket = originalWebSocket;
+    jest.useRealTimers();
+  }
+});
+
+test('connected Leave keeps credentials and socket until sessionLeft acknowledgement', () => {
+  const originalWebSocket = global.WebSocket;
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+
+  try {
+    const { socket } = renderConnectedPrivateSession();
+    fireEvent.click(screen.getByRole('button', { name: 'Leave game' }));
+
+    expect(JSON.parse(socket.send.mock.calls[1][0])).toMatchObject({ type: 'leaveSession', sessionId: 'session-id' });
+    expect(localStorage.getItem('multiplayerResumeCredentials')).not.toBeNull();
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Leaving…' })).toBeDisabled();
+
+    act(() => socket.onmessage?.({ data: JSON.stringify({
+      type: 'sessionLeft', sessionId: 'session-id', playerId: 'player-id', sessionDeleted: true,
+    }) }));
+
+    expect(localStorage.getItem('multiplayerResumeCredentials')).toBeNull();
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('Connection status')).toHaveTextContent('Disconnected');
+  } finally {
+    global.WebSocket = originalWebSocket;
+  }
+});
+
+test('offline Leave resumes, sends leave after snapshot, and waits for acknowledgement', () => {
+  const originalWebSocket = global.WebSocket;
+  jest.useFakeTimers();
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+
+  try {
+    const { socket } = renderConnectedPrivateSession();
+    act(() => socket.onclose?.({ code: 1006 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Leave game' }));
+
+    expect(localStorage.getItem('multiplayerResumeCredentials')).not.toBeNull();
+    expect(LifecycleWebSocket.instances).toHaveLength(2);
+    const resumed = LifecycleWebSocket.instances[1];
+    act(() => resumed.onopen?.());
+    expect(JSON.parse(resumed.send.mock.calls[0][0])).toMatchObject({ type: 'resumeSession', playerId: 'player-id' });
+
+    act(() => resumed.onmessage?.({ data: JSON.stringify({ type: 'stateSnapshot', sessionState: privateSessionState() }) }));
+    expect(JSON.parse(resumed.send.mock.calls[1][0])).toMatchObject({ type: 'leaveSession', sessionId: 'session-id' });
+    expect(localStorage.getItem('multiplayerResumeCredentials')).not.toBeNull();
+
+    act(() => resumed.onmessage?.({ data: JSON.stringify({
+      type: 'sessionLeft', sessionId: 'session-id', playerId: 'player-id', sessionDeleted: false,
+    }) }));
+    expect(localStorage.getItem('multiplayerResumeCredentials')).toBeNull();
+    expect(resumed.close).toHaveBeenCalledTimes(1);
+  } finally {
+    global.WebSocket = originalWebSocket;
+    jest.useRealTimers();
+  }
+});
+
+test('Leave acknowledgement timeout preserves credentials for retry', () => {
+  const originalWebSocket = global.WebSocket;
+  jest.useFakeTimers();
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+
+  try {
+    const { socket } = renderConnectedPrivateSession();
+    fireEvent.click(screen.getByRole('button', { name: 'Leave game' }));
+    act(() => jest.advanceTimersByTime(4000));
+
+    expect(localStorage.getItem('multiplayerResumeCredentials')).not.toBeNull();
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(screen.getByText(/Could not confirm leaving/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Leave game' })).toBeEnabled();
+  } finally {
+    global.WebSocket = originalWebSocket;
+    jest.useRealTimers();
+  }
+});
+
+test('SESSION_NOT_FOUND while finishing offline Leave safely clears local credentials', () => {
+  const originalWebSocket = global.WebSocket;
+  jest.useFakeTimers();
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+
+  try {
+    const { socket } = renderConnectedPrivateSession();
+    act(() => socket.onclose?.({ code: 1006 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Leave game' }));
+    const resumed = LifecycleWebSocket.instances[1];
+    act(() => resumed.onopen?.());
+    act(() => resumed.onmessage?.({ data: JSON.stringify({
+      type: 'error', errors: [{ code: 'SESSION_NOT_FOUND', message: 'Session does not exist' }],
+    }) }));
+
+    expect(localStorage.getItem('multiplayerResumeCredentials')).toBeNull();
+    expect(resumed.close).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('Connection status')).toHaveTextContent('Disconnected');
+  } finally {
+    global.WebSocket = originalWebSocket;
+    jest.useRealTimers();
   }
 });

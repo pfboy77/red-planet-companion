@@ -77,6 +77,7 @@ const stateSnapshot = validateFixture("state-snapshot.json", validators.server);
 validateFixture("stale-revision-error.json", validators.server);
 validateFixture("invalid-message.json", validators.server);
 const sessionJoined = validateFixture("session-joined.json", validators.server);
+const sessionLeft = validateFixture("session-left.json", validators.server);
 validateFixture("session-full-error.json", validators.server);
 validateFixture("authentication-failed-error.json", validators.server);
 
@@ -277,6 +278,11 @@ const invalidCases = [
     description: "sessionJoined without resumeToken is rejected",
     validator: validators.server,
     data: without(sessionJoined, "resumeToken"),
+  },
+  {
+    description: "sessionLeft requires sessionDeleted",
+    validator: validators.server,
+    data: without(sessionLeft, "sessionDeleted"),
   },
   {
     description: "STALE_REVISION uses actionRejected, not error",

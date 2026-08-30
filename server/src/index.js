@@ -6,6 +6,7 @@ import { SessionManager } from "./session-manager.js";
 import { formatClientMessageValidationError, mutationTypes, validateClientMessage } from "./validator.js";
 
 const timestamped = (message) => ({ protocolVersion: "v1", timestamp: new Date().toISOString(), ...message });
+export const CONNECTION_REPLACED_CLOSE_CODE = 4001;
 
 export function createLocalServer({ manager = new SessionManager() } = {}) {
   const peers = new Set();
@@ -40,7 +41,7 @@ export function createLocalServer({ manager = new SessionManager() } = {}) {
         || existingPeer.sessionId !== peer.sessionId
         || existingPeer.playerId !== peer.playerId) continue;
       existingPeer.replaced = true;
-      existingPeer.socket.close(1000, "Connection replaced");
+      existingPeer.socket.close(CONNECTION_REPLACED_CLOSE_CODE, "Connection replaced");
     }
   };
   const isUUID = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -96,7 +97,16 @@ export function createLocalServer({ manager = new SessionManager() } = {}) {
     if (message.type === "leaveSession") {
       const authorizationError = peerAuthorizationError(peer, message);
       if (authorizationError) return reject(peer, authorizationError);
-      const result = manager.leave(message.sessionId, peer.playerId);
+      const sessionId = peer.sessionId;
+      const playerId = peer.playerId;
+      const result = manager.leave(sessionId, playerId);
+      if (!result) return reject(peer, { code: "PLAYER_NOT_FOUND", message: "The bound player is not in this session" });
+      send(peer, {
+        type: "sessionLeft",
+        sessionId,
+        playerId,
+        sessionDeleted: result.sessionDeleted === true,
+      });
       peer.sessionId = undefined;
       peer.playerId = undefined;
       peer.clientId = undefined;
@@ -158,7 +168,6 @@ export function createLocalServer({ manager = new SessionManager() } = {}) {
       if (peer.replaced) return;
       const result = manager.disconnect(peer.sessionId, peer.playerId);
       if (result) {
-        broadcast(result.state, { type: "playerLeft", playerId: result.player.playerId, displayName: result.player.displayName, playerCount: result.state.players.length });
         broadcast(result.state);
       }
     });
