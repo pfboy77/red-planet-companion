@@ -1,0 +1,8 @@
+{
+    "type": "resumeSession",
+    "protocolVersion": "v1",
+    "requestId": "b2c3d4e5-f6a7-8901-bcde-f12345678902",
+    "sessionId": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+    "playerId": "e1f2a3b4-c5d6-7890-efab-012345678901",
+    "resumeToken": "0123456789abcdef0123456789abcdef"
+}

@@ -35,6 +35,27 @@
             "$ref": "#/definitions/errorMessage"
         }
     ],
+    "allOf": [
+        {
+            "not": {
+                "required": [
+                    "type",
+                    "resumeToken"
+                ],
+                "properties": {
+                    "resumeToken": {},
+                    "type": {
+                        "not": {
+                            "enum": [
+                                "sessionCreated",
+                                "sessionJoined"
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    ],
     "definitions": {
         "_common": {
             "type": "object",
@@ -65,7 +86,9 @@
                     "required": [
                         "sessionId",
                         "joinCode",
-                        "hostClientId",
+                        "hostPlayerId",
+                        "playerId",
+                        "roomMode",
                         "sessionState"
                     ],
                     "properties": {
@@ -80,14 +103,28 @@
                             "type": "string",
                             "pattern": "^[A-Z0-9]{6}$"
                         },
-                        "hostClientId": {
+                        "hostPlayerId": {
                             "type": "string",
                             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        "playerId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        "roomMode": {
+                            "type": "string",
+                            "enum": ["friends", "private"]
+                        },
+                        "resumeToken": {
+                            "$ref": "#/definitions/resumeToken"
                         },
                         "sessionState": {
                             "$ref": "session-state.schema.json"
                         }
-                    }
+                    },
+                    "if": { "required": ["roomMode"], "properties": { "roomMode": { "const": "private" } } },
+                    "then": { "required": ["resumeToken"], "properties": { "resumeToken": { "$ref": "#/definitions/resumeToken" } } },
+                    "else": { "not": { "required": ["resumeToken"] } }
                 }
             ]
         },
@@ -100,7 +137,8 @@
                     "required": [
                         "sessionId",
                         "playerId",
-                        "playerIndex"
+                        "playerIndex",
+                        "roomMode"
                     ],
                     "properties": {
                         "type": {
@@ -117,8 +155,18 @@
                         "playerIndex": {
                             "type": "integer",
                             "minimum": 0
+                        },
+                        "roomMode": {
+                            "type": "string",
+                            "enum": ["friends", "private"]
+                        },
+                        "resumeToken": {
+                            "$ref": "#/definitions/resumeToken"
                         }
-                    }
+                    },
+                    "if": { "required": ["roomMode"], "properties": { "roomMode": { "const": "private" } } },
+                    "then": { "required": ["resumeToken"], "properties": { "resumeToken": { "$ref": "#/definitions/resumeToken" } } },
+                    "else": { "not": { "required": ["resumeToken"] } }
                 }
             ]
         },
@@ -156,6 +204,7 @@
                     "required": [
                         "actionId",
                         "revision",
+                        "playerRevision",
                         "sessionState"
                     ],
                     "properties": {
@@ -167,6 +216,10 @@
                             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
                         },
                         "revision": {
+                            "type": "integer",
+                            "minimum": 0
+                        },
+                        "playerRevision": {
                             "type": "integer",
                             "minimum": 0
                         },
@@ -199,7 +252,7 @@
                             "type": "array",
                             "minItems": 1,
                             "items": {
-                                "$ref": "#/definitions/error"
+                                "$ref": "#/definitions/actionError"
                             }
                         }
                     }
@@ -332,14 +385,55 @@
                             "type": "array",
                             "minItems": 1,
                             "items": {
-                                "$ref": "#/definitions/error"
+                                "$ref": "#/definitions/requestError"
                             }
                         }
                     }
                 }
             ]
         },
-        "error": {
+        "resumeToken": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Opaque per-player reconnect credential. Never included in SessionState."
+        },
+        "actionError": {
+            "type": "object",
+            "required": [
+                "code",
+                "message"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "enum": [
+                        "INVALID_MESSAGE",
+                        "PLAYER_NOT_FOUND",
+                        "DUPLICATE_ACTION",
+                        "STALE_REVISION",
+                        "INVALID_RESOURCE",
+                        "INVALID_OPERATION",
+                        "INVALID_AMOUNT",
+                        "INVALID_PRODUCTION",
+                        "INVALID_TR",
+                        "AUTHENTICATION_FAILED",
+                        "NOT_JOINED",
+                        "SESSION_MISMATCH",
+                        "RATE_LIMITED",
+                        "INTERNAL_ERROR"
+                    ]
+                },
+                "message": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                }
+            }
+        },
+        "requestError": {
             "type": "object",
             "required": [
                 "code",
@@ -355,12 +449,10 @@
                         "SESSION_NOT_FOUND",
                         "INVALID_JOIN_CODE",
                         "PLAYER_NOT_FOUND",
-                        "DUPLICATE_ACTION",
-                        "STALE_REVISION",
-                        "INVALID_RESOURCE",
-                        "INVALID_AMOUNT",
-                        "INVALID_PRODUCTION",
-                        "INVALID_TR",
+                        "SESSION_FULL",
+                        "AUTHENTICATION_FAILED",
+                        "NOT_JOINED",
+                        "SESSION_MISMATCH",
                         "RATE_LIMITED",
                         "INTERNAL_ERROR"
                     ]

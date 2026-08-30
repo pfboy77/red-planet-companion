@@ -16,15 +16,15 @@ Red Planet Companion is a fan-made strategy board game companion with React/Type
 red-planet-companion/
 ├── src/                           # Web版 (React/TypeScript)
 ├── ios/
-│     └── terformingmars2/         # iOS SwiftUI アプリ
-│           ├── terformingmars2.xcodeproj/
-│           ├── terformingmars2/   # Swift ソース
-│           ├── terformingmars2Tests/
-│           └── terformingmars2UITests/
+│     └── teraformingmars2/         # iOS SwiftUI アプリ
+│           ├── teraformingmars2.xcodeproj/
+│           ├── Domain/             # Swift ドメイン層
+│           ├── teraformingmars2Tests/
+│           └── teraformingmars2UITests/
 ├── protocol/
 │     ├── schemas/                 # 共通JSON Schema
 │     └── fixtures/                # 検証用フィクスチャ
-├── server/                        # ローカルマルチプレイサーバー（次フェーズ）
+├── server/                        # ローカルマルチプレイ WebSocket サーバー
 │     ├── src/
 │     └── test/
 ├── docs/                          # ドキュメント
@@ -39,7 +39,7 @@ red-planet-companion/
 - Terraform Rating tracking
 - Resource production phase
 - Undo / redo support
-- Browser localStorage and iOS UserDefaults persistence
+- Browser localStorage and iOS local-state persistence (Private resume token is stored in Keychain)
 - Responsive web UI
 - Local network multiplayer resource sharing
 
@@ -78,6 +78,7 @@ Open http://localhost:3000 in your browser.
 
    ```bash
    cd server
+   npm ci
    npm start
    ```
 
@@ -89,7 +90,7 @@ Open http://localhost:3000 in your browser.
    npm start
    ```
 
-   ブラウザで `http://localhost:3000` を開き、「Local multiplayer」欄にプレイヤー名を入力して **Create game** を選びます。ホストPCでの Server URL は `ws://localhost:8080/ws` のままで構いません。
+   ブラウザで `http://localhost:3000` を開き、「Local multiplayer」欄にプレイヤー名を入力します。通常は **Friends**（信頼できる同じ場所・LAN向け）を選び、**Create game** を押します。共有 Wi-Fi など再接続時の本人確認を強めたい場合は **Private** を選びます。どちらもパスワード入力は不要です。ホストPCでの Server URL は `ws://localhost:8080/ws` のままで構いません。
 
 3. 表示された **Session ID** と **Join code** を、ほかのプレイヤーに共有します。
 
@@ -103,6 +104,8 @@ Open http://localhost:3000 in your browser.
 
 接続後は、各自が自分の資源を操作でき、画面下部の **Other players’ resources** で他プレイヤーの接続状態、TR、資源量、産出量を確認できます。同じ通常ブラウザの別タブは同じプレイヤーとして扱われるため、検証時も別ブラウザまたはプライベートウインドウを使用してください。
 
+Friends はブラウザ/iOSが保持する端末 ID で簡易再接続します。Private はサーバーが発行したプレイヤー専用 resume token をクライアントが自動保存して使います。token の入力や共有は不要で、他プレイヤーの snapshot に token や `clientId` は含まれません。切断時は接続状態が表示され、再接続が完了するまで操作は送信されません。
+
 自分だけ退出する場合は **Leave game** を選びます。サーバー全体を終了する場合は、サーバー用ターミナルで `Ctrl+C` を押してください。
 
 ### iOS
@@ -111,7 +114,9 @@ Open http://localhost:3000 in your browser.
 open ios/teraformingmars2/teraformingmars2.xcodeproj
 ```
 
-XcodeでiOSアプリを起動した後、画面上部の `Local multiplayer` にサーバーURLとプレイヤー名を入力します。ホストPC上で実行する場合は `ws://<ホストPCのLAN IP>:8080/ws` を指定し、Web版と同じ Session ID / Join code で参加できます。iOS版でも自分の資源操作はサーバーへ送信され、他プレイヤーの資源は画面下部に表示されます。`Leave` でその端末だけ退出できます。
+XcodeでiOSアプリを起動した後、ホーム画面のローカルマルチプレイ欄にサーバーURLとプレイヤー名を入力します。作成時は Friends / Private を選択できます。ホストPC上で実行する場合は `ws://<ホストPCのLAN IP>:8080/ws` を指定します。iPhone上の `localhost` はホストPCではなくiPhone自身を指すため使用できません。Web版と同じ Session ID / Join code で参加でき、自分の資源操作はサーバーへ送信されます。Private の resume token は Keychain へ自動保存され、ユーザー入力は不要です。退出後はマルチプレイ参加前のローカルゲーム状態へ戻ります。
+
+iOS版の提出準備と実機確認手順は [iOSリリース・チェックリスト](docs/IOS_RELEASE_CHECKLIST.md) を参照してください。
 
 ## Project Goal
 
@@ -122,7 +127,7 @@ This project explores maintainable cross-platform architecture for turn-based st
 - Improve UI/UX
 - Add save/load improvements
 - Refactor game logic into reusable modules
-- Connect the iOS client to the shared multiplayer protocol
+- Add TestFlight feedback and improve local multiplayer onboarding
 
 ## Contributing
 

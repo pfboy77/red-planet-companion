@@ -1,0 +1,11 @@
+{
+    "type": "error",
+    "protocolVersion": "v1",
+    "timestamp": "2026-07-13T12:00:07.000Z",
+    "errors": [
+        {
+            "code": "SESSION_FULL",
+            "message": "The session already has the maximum number of players."
+        }
+    ]
+}

@@ -49,7 +49,7 @@ func applyProduction(state: GameState) -> GameState {
     for i in 0..<resources.count {
         let r = resources[i]
         let productionGain = r.production + (r.isMegaCredit ? state.tr : 0)
-        resources[i].amount += productionGain
+        resources[i].amount = max(0, resources[i].amount + productionGain)
     }
 
     return GameState(version: state.version, resources: resources, tr: state.tr)

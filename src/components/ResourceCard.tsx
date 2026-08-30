@@ -8,6 +8,7 @@ interface Props {
   addAmount: () => void;
   subtractAmount: () => void;
   updateProduction: (value: number) => void;
+  disabled?: boolean;
 }
 
 const buttonStyle = {
@@ -24,7 +25,8 @@ const ResourceCard: React.FC<Props> = ({
   setDelta,
   addAmount,
   subtractAmount,
-  updateProduction
+  updateProduction,
+  disabled = false
 }) => {
   return (
     <div
@@ -42,7 +44,7 @@ const ResourceCard: React.FC<Props> = ({
 
       {/* − 入力 ＋ の並び */}
       <div style={{ display: "flex", alignItems: "center", gap: "4px", marginBottom: 8 }}>
-        <button onClick={subtractAmount} style={buttonStyle}>−</button>
+        <button onClick={subtractAmount} disabled={disabled} style={buttonStyle}>−</button>
         <input
           type="number"
           value={delta === 0 ? "" : delta}
@@ -50,9 +52,10 @@ const ResourceCard: React.FC<Props> = ({
             const val = e.target.value;
             setDelta(val === "" ? 0 : Number(val));
           }}
+          disabled={disabled}
           style={{ width: "60px", textAlign: "center" }}
         />
-        <button onClick={addAmount} style={buttonStyle}>＋</button>
+        <button onClick={addAmount} disabled={disabled} style={buttonStyle}>＋</button>
       </div>
 
       {/* 生産: − x ＋ */}
@@ -64,6 +67,7 @@ const ResourceCard: React.FC<Props> = ({
               Math.max(resource.production - 1, resource.isMegaCredit ? -5 : 0)
             )
           }
+          disabled={disabled}
           style={{ ...buttonStyle, marginRight: 4 }}
         >
           −
@@ -75,6 +79,7 @@ const ResourceCard: React.FC<Props> = ({
               Math.min(resource.production + 1, 20)
             )
           }
+          disabled={disabled}
           style={{ ...buttonStyle, marginLeft: 4 }}
         >
           ＋

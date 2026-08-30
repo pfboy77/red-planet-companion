@@ -7,17 +7,18 @@
         "protocolVersion": "v1",
         "sessionId": "c3d4e5f6-a7b8-9012-cdef-123456789012",
         "joinCode": "A7B2C9",
+        "roomMode": "private",
         "revision": 5,
         "createdAt": "2026-07-13T12:00:00.000Z",
         "updatedAt": "2026-07-13T12:00:05.000Z",
-        "hostClientId": "d4e5f6a7-b8c9-0123-defa-234567890123",
+        "hostPlayerId": "e1f2a3b4-c5d6-7890-efab-012345678901",
         "players": [
             {
                 "playerId": "e1f2a3b4-c5d6-7890-efab-012345678901",
-                "clientId": "d4e5f6a7-b8c9-0123-defa-234567890123",
                 "displayName": "Player1",
                 "connected": true,
                 "lastSeenAt": "2026-07-13T12:00:05.000Z",
+                "revision": 3,
                 "tr": 20,
                 "resources": {
                     "MC":       { "amount": 0, "production": 0 },
