@@ -79,6 +79,7 @@ validateFixture("invalid-message.json", validators.server);
 const sessionJoined = validateFixture("session-joined.json", validators.server);
 const sessionLeft = validateFixture("session-left.json", validators.server);
 validateFixture("session-full-error.json", validators.server);
+validateFixture("already-joined-error.json", validators.server);
 validateFixture("authentication-failed-error.json", validators.server);
 
 check(validators.session(stateSnapshot.sessionState),

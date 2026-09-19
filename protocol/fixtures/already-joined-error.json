@@ -1,0 +1,11 @@
+{
+    "type": "error",
+    "protocolVersion": "v1",
+    "timestamp": "2026-08-31T00:00:00.000Z",
+    "errors": [
+        {
+            "code": "ALREADY_JOINED",
+            "message": "Leave the current session before joining another session."
+        }
+    ]
+}

@@ -54,6 +54,13 @@ export function createLocalServer({ manager = new SessionManager() } = {}) {
       return reject(peer, validationError);
     }
     if (message.type === "ping") return send(peer, { type: "pong" });
+    if (["createSession", "joinSession", "resumeSession"].includes(message.type)
+      && (peer.sessionId || peer.playerId)) {
+      return reject(peer, {
+        code: "ALREADY_JOINED",
+        message: "Leave the current session before joining another session.",
+      });
+    }
 
     if (message.type === "createSession") {
       const result = manager.createSession(message);

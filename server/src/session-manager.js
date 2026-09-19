@@ -75,7 +75,8 @@ export class SessionManager {
       authenticatedPlayerId = session.clientPlayers.get(clientId);
       if (!authenticatedPlayerId) return { error: error("PLAYER_NOT_FOUND", "Player is not in this session") };
     } else {
-      if (!playerId || !resumeToken || session.credentials.get(playerId) !== resumeToken) return { error: error("AUTHENTICATION_FAILED", "Resume token is invalid") };
+      if (!this.findPlayer(session, playerId)) return { error: error("PLAYER_NOT_FOUND", "Player is not in this session") };
+      if (!resumeToken || session.credentials.get(playerId) !== resumeToken) return { error: error("AUTHENTICATION_FAILED", "Resume token is invalid") };
       authenticatedPlayerId = playerId;
     }
     const player = this.findPlayer(session, authenticatedPlayerId);

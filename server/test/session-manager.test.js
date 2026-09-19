@@ -67,6 +67,31 @@ test("private resume requires the issued player token", () => {
   assert.equal(manager.resume({ sessionId: state.sessionId, playerId: player.playerId, resumeToken: created.resumeToken }).player.connected, true);
 });
 
+test("private resume distinguishes a missing player from an invalid token", () => {
+  const manager = new SessionManager();
+  const { state } = createRoom(manager, "private");
+  const joined = manager.join({
+    sessionId: state.sessionId,
+    joinCode: state.joinCode,
+    clientId: randomUUID(),
+    displayName: "Ben",
+  });
+
+  assert.equal(manager.resume({
+    sessionId: state.sessionId,
+    playerId: joined.player.playerId,
+    resumeToken: "wrong-token-value-that-is-long-enough",
+  }).error.code, "AUTHENTICATION_FAILED");
+
+  manager.leave(state.sessionId, joined.player.playerId);
+
+  assert.equal(manager.resume({
+    sessionId: state.sessionId,
+    playerId: joined.player.playerId,
+    resumeToken: joined.resumeToken,
+  }).error.code, "PLAYER_NOT_FOUND");
+});
+
 test("private join issues a token but never adds it to a snapshot", () => {
   const manager = new SessionManager();
   const { state } = createRoom(manager, "private");

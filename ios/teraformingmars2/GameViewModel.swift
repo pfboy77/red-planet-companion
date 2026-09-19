@@ -116,6 +116,7 @@ final class GameViewModel {
     @ObservationIgnored private var resumeToken: String?
     @ObservationIgnored private var leaveAfterReconnect = false
     @ObservationIgnored private var leaveRequestInFlight = false
+    @ObservationIgnored private var leaveReconnectAttempted = false
     @ObservationIgnored private var switchToSoloAfterLeave = false
     @ObservationIgnored private var leaveTimeoutTask: Task<Void, Never>?
     @ObservationIgnored private let leaveAcknowledgementTimeoutNanoseconds: UInt64
@@ -184,6 +185,10 @@ final class GameViewModel {
             if self.isLeavingMultiplayer {
                 self.leaveAfterReconnect = self.canResumeSession
                 self.multiplayerError = "退出確認中に接続が切れました。再接続情報を保持して確認を待ちます。"
+                if !self.leaveReconnectAttempted, self.canResumeSession, !self.isConnecting {
+                    self.leaveReconnectAttempted = true
+                    self.resumeMultiplayerGame()
+                }
             } else {
                 self.multiplayerError = "ローカルサーバーとの接続が切断されました。再接続してください。"
             }
@@ -230,6 +235,7 @@ final class GameViewModel {
         isLeavingMultiplayer = true
         leaveAfterReconnect = !isMultiplayerConnected
         leaveRequestInFlight = false
+        leaveReconnectAttempted = false
         multiplayerError = nil
         clearPendingActions()
         startLeaveTimeout()
@@ -373,6 +379,7 @@ final class GameViewModel {
         isLeavingMultiplayer = false
         leaveAfterReconnect = false
         leaveRequestInFlight = false
+        leaveReconnectAttempted = false
         switchToSoloAfterLeave = false
         multiplayerError = message
     }
@@ -390,6 +397,7 @@ final class GameViewModel {
         pendingConnectionRequest = nil
         leaveAfterReconnect = false
         leaveRequestInFlight = false
+        leaveReconnectAttempted = false
         switchToSoloAfterLeave = false
         clearPendingActions()
         clearActiveSessionCredentials()
@@ -478,6 +486,10 @@ final class GameViewModel {
     }
 
     private func handleMultiplayerMessage(_ message: [String: Any]) {
+        guard message["protocolVersion"] as? String == "v1" else {
+            multiplayerError = "サーバーの通信プロトコルのバージョンに対応していません。"
+            return
+        }
         guard let type = message["type"] as? String else { return }
         switch type {
         case "connectionState":
@@ -552,7 +564,7 @@ final class GameViewModel {
             let errorMessage = firstErrorMessage(in: message) ?? "サーバーがリクエストを拒否しました。"
             let code = (message["errors"] as? [[String: Any]])?.first?["code"] as? String
             if isLeavingMultiplayer {
-                if code == "SESSION_NOT_FOUND" { completeLeave() }
+                if let code, ["SESSION_NOT_FOUND", "PLAYER_NOT_FOUND"].contains(code) { completeLeave() }
                 else {
                     isConnecting = false
                     isMultiplayerConnected = false

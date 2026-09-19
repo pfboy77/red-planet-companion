@@ -167,6 +167,10 @@ function App() {
       let message: any;
       try { message = JSON.parse(event.data); }
       catch { setError("The local server sent an invalid response."); return; }
+      if (!message || message.protocolVersion !== "v1") {
+        setError("The local server is using an unsupported protocol version.");
+        return;
+      }
       if (message.type === "sessionCreated") {
         setJoinSessionId(message.sessionId); setJoinCode(message.joinCode);
         setRoomMode(message.roomMode);
@@ -219,7 +223,7 @@ function App() {
       if (message.type === "error") {
         const code = message.errors?.[0]?.code;
         const errorMessage = message.errors?.[0]?.message || "Server rejected the request.";
-        if (pendingLeaveRef.current && code === "SESSION_NOT_FOUND") {
+        if (pendingLeaveRef.current && ["SESSION_NOT_FOUND", "PLAYER_NOT_FOUND"].includes(code)) {
           completeLeave();
           return;
         }

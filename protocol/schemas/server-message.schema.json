@@ -483,6 +483,7 @@
                         "INVALID_JOIN_CODE",
                         "PLAYER_NOT_FOUND",
                         "SESSION_FULL",
+                        "ALREADY_JOINED",
                         "AUTHENTICATION_FAILED",
                         "NOT_JOINED",
                         "SESSION_MISMATCH",

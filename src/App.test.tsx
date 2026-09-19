@@ -21,14 +21,18 @@ class LifecycleWebSocket {
   constructor(readonly url: string) { LifecycleWebSocket.instances.push(this); }
 }
 
-const privateSessionState = () => ({
+const privateSessionState = (tr = 20) => ({
   protocolVersion: 'v1', sessionId: 'session-id', joinCode: 'ABC234', revision: 0,
   roomMode: 'private', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), hostPlayerId: 'player-id',
   players: [{
     playerId: 'player-id', displayName: 'Ada', connected: true,
-    lastSeenAt: new Date().toISOString(), revision: 0, tr: 20,
+    lastSeenAt: new Date().toISOString(), revision: 0, tr,
     resources: Object.fromEntries(['MC', 'Steel', 'Titanium', 'Plants', 'Energy', 'Heat'].map(name => [name, { amount: 0, production: 0 }])),
   }],
+});
+
+const serverMessage = (type: string, fields: Record<string, unknown> = {}) => ({
+  type, protocolVersion: 'v1', ...fields,
 });
 
 function renderConnectedPrivateSession() {
@@ -39,10 +43,10 @@ function renderConnectedPrivateSession() {
   const socket = LifecycleWebSocket.instances[0];
   act(() => socket.onopen?.());
   const createRequest = JSON.parse(socket.send.mock.calls[0][0]);
-  act(() => socket.onmessage?.({ data: JSON.stringify({
-    type: 'sessionCreated', sessionId: 'session-id', joinCode: 'ABC234', playerId: 'player-id', roomMode: 'private',
+  act(() => socket.onmessage?.({ data: JSON.stringify(serverMessage('sessionCreated', {
+    sessionId: 'session-id', joinCode: 'ABC234', playerId: 'player-id', roomMode: 'private',
     resumeToken: '0123456789abcdef0123456789abcdef', sessionState: privateSessionState(),
-  }) }));
+  })) }));
   return { socket, createRequest };
 }
 
@@ -122,9 +126,9 @@ test('session creation authenticates the host and stores only its resume token l
         resources: Object.fromEntries(['MC', 'Steel', 'Titanium', 'Plants', 'Energy', 'Heat'].map(name => [name, { amount: 0, production: 0 }])),
       }],
     };
-    act(() => connection.onmessage?.({ data: JSON.stringify({
-      type: 'sessionCreated', sessionId: 'session-id', joinCode: 'ABC234', playerId: 'player-id', roomMode: 'private', resumeToken: '0123456789abcdef0123456789abcdef', sessionState,
-    }) }));
+    act(() => connection.onmessage?.({ data: JSON.stringify(serverMessage('sessionCreated', {
+      sessionId: 'session-id', joinCode: 'ABC234', playerId: 'player-id', roomMode: 'private', resumeToken: '0123456789abcdef0123456789abcdef', sessionState,
+    })) }));
 
     expect(connection.send).toHaveBeenCalledTimes(1);
     expect(JSON.parse(localStorage.getItem('multiplayerResumeCredentials')!)).toEqual({
@@ -164,11 +168,11 @@ test('a joined player reconnects with its private resume token', () => {
     const joinRequest = JSON.parse(firstConnection.send.mock.calls[0][0]);
     expect(joinRequest).toMatchObject({ type: 'joinSession', sessionId: 'session-id', joinCode: 'ABC234', displayName: 'Ben' });
 
-    act(() => firstConnection.onmessage?.({ data: JSON.stringify({
-      type: 'sessionJoined', sessionId: 'session-id', playerId: 'player-id', playerIndex: 1,
+    act(() => firstConnection.onmessage?.({ data: JSON.stringify(serverMessage('sessionJoined', {
+      sessionId: 'session-id', playerId: 'player-id', playerIndex: 1,
       roomMode: 'private',
       resumeToken: 'fedcba9876543210fedcba9876543210',
-    }) }));
+    })) }));
     act(() => firstConnection.onclose?.());
     act(() => jest.advanceTimersByTime(1000));
 
@@ -246,14 +250,14 @@ test('friends mode needs no token and mutations use the bound player revision', 
     expect(create.roomMode).toBe('friends');
 
     const resources = Object.fromEntries(['MC', 'Steel', 'Titanium', 'Plants', 'Energy', 'Heat'].map(name => [name, { amount: 0, production: 0 }]));
-    act(() => connection.onmessage?.({ data: JSON.stringify({
-      type: 'sessionCreated', sessionId: 'session-id', joinCode: 'ABC234', playerId: 'player-id', roomMode: 'friends',
+    act(() => connection.onmessage?.({ data: JSON.stringify(serverMessage('sessionCreated', {
+      sessionId: 'session-id', joinCode: 'ABC234', playerId: 'player-id', roomMode: 'friends',
       sessionState: {
         protocolVersion: 'v1', sessionId: 'session-id', joinCode: 'ABC234', roomMode: 'friends', revision: 8,
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), hostPlayerId: 'player-id',
         players: [{ playerId: 'player-id', displayName: 'Ada', connected: true, lastSeenAt: new Date().toISOString(), revision: 4, tr: 20, resources }],
       },
-    }) }));
+    })) }));
 
     expect(screen.getByRole('button', { name: /Undo/ })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Increase TR' }));
@@ -408,9 +412,9 @@ test('connected Leave keeps credentials and socket until sessionLeft acknowledge
     expect(socket.close).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Leaving…' })).toBeDisabled();
 
-    act(() => socket.onmessage?.({ data: JSON.stringify({
-      type: 'sessionLeft', sessionId: 'session-id', playerId: 'player-id', sessionDeleted: true,
-    }) }));
+    act(() => socket.onmessage?.({ data: JSON.stringify(serverMessage('sessionLeft', {
+      sessionId: 'session-id', playerId: 'player-id', sessionDeleted: true,
+    })) }));
 
     expect(localStorage.getItem('multiplayerResumeCredentials')).toBeNull();
     expect(socket.close).toHaveBeenCalledTimes(1);
@@ -436,13 +440,13 @@ test('offline Leave resumes, sends leave after snapshot, and waits for acknowled
     act(() => resumed.onopen?.());
     expect(JSON.parse(resumed.send.mock.calls[0][0])).toMatchObject({ type: 'resumeSession', playerId: 'player-id' });
 
-    act(() => resumed.onmessage?.({ data: JSON.stringify({ type: 'stateSnapshot', sessionState: privateSessionState() }) }));
+    act(() => resumed.onmessage?.({ data: JSON.stringify(serverMessage('stateSnapshot', { sessionState: privateSessionState() })) }));
     expect(JSON.parse(resumed.send.mock.calls[1][0])).toMatchObject({ type: 'leaveSession', sessionId: 'session-id' });
     expect(localStorage.getItem('multiplayerResumeCredentials')).not.toBeNull();
 
-    act(() => resumed.onmessage?.({ data: JSON.stringify({
-      type: 'sessionLeft', sessionId: 'session-id', playerId: 'player-id', sessionDeleted: false,
-    }) }));
+    act(() => resumed.onmessage?.({ data: JSON.stringify(serverMessage('sessionLeft', {
+      sessionId: 'session-id', playerId: 'player-id', sessionDeleted: false,
+    })) }));
     expect(localStorage.getItem('multiplayerResumeCredentials')).toBeNull();
     expect(resumed.close).toHaveBeenCalledTimes(1);
   } finally {
@@ -482,9 +486,9 @@ test('SESSION_NOT_FOUND while finishing offline Leave safely clears local creden
     fireEvent.click(screen.getByRole('button', { name: 'Leave game' }));
     const resumed = LifecycleWebSocket.instances[1];
     act(() => resumed.onopen?.());
-    act(() => resumed.onmessage?.({ data: JSON.stringify({
-      type: 'error', errors: [{ code: 'SESSION_NOT_FOUND', message: 'Session does not exist' }],
-    }) }));
+    act(() => resumed.onmessage?.({ data: JSON.stringify(serverMessage('error', {
+      errors: [{ code: 'SESSION_NOT_FOUND', message: 'Session does not exist' }],
+    })) }));
 
     expect(localStorage.getItem('multiplayerResumeCredentials')).toBeNull();
     expect(resumed.close).toHaveBeenCalledTimes(1);
@@ -492,5 +496,74 @@ test('SESSION_NOT_FOUND while finishing offline Leave safely clears local creden
   } finally {
     global.WebSocket = originalWebSocket;
     jest.useRealTimers();
+  }
+});
+
+test('PLAYER_NOT_FOUND after a lost Leave acknowledgement completes Leave', () => {
+  const originalWebSocket = global.WebSocket;
+  jest.useFakeTimers();
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+
+  try {
+    const { socket } = renderConnectedPrivateSession();
+    fireEvent.click(screen.getByRole('button', { name: 'Leave game' }));
+    expect(JSON.parse(socket.send.mock.calls[1][0])).toMatchObject({ type: 'leaveSession' });
+
+    act(() => socket.onclose?.({ code: 1006 }));
+    act(() => jest.advanceTimersByTime(1000));
+    const resumed = LifecycleWebSocket.instances[1];
+    act(() => resumed.onopen?.());
+    expect(JSON.parse(resumed.send.mock.calls[0][0])).toMatchObject({ type: 'resumeSession', playerId: 'player-id' });
+
+    act(() => resumed.onmessage?.({ data: JSON.stringify(serverMessage('error', {
+      errors: [{ code: 'PLAYER_NOT_FOUND', message: 'Player is not in this session' }],
+    })) }));
+
+    expect(localStorage.getItem('multiplayerResumeCredentials')).toBeNull();
+    expect(resumed.close).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('Connection status')).toHaveTextContent('Disconnected');
+  } finally {
+    global.WebSocket = originalWebSocket;
+    jest.useRealTimers();
+  }
+});
+
+test('AUTHENTICATION_FAILED while leaving preserves credentials', () => {
+  const originalWebSocket = global.WebSocket;
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+
+  try {
+    const { socket } = renderConnectedPrivateSession();
+    fireEvent.click(screen.getByRole('button', { name: 'Leave game' }));
+    act(() => socket.onmessage?.({ data: JSON.stringify(serverMessage('error', {
+      errors: [{ code: 'AUTHENTICATION_FAILED', message: 'Resume token is invalid' }],
+    })) }));
+
+    expect(localStorage.getItem('multiplayerResumeCredentials')).not.toBeNull();
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Leave game' })).toBeEnabled();
+    expect(screen.getByText(/credentials were kept/)).toBeInTheDocument();
+  } finally {
+    global.WebSocket = originalWebSocket;
+  }
+});
+
+test.each([
+  ['unsupported', { type: 'stateSnapshot', protocolVersion: 'v2', sessionState: privateSessionState(99) }],
+  ['missing', { type: 'stateSnapshot', sessionState: privateSessionState(99) }],
+])('%s server protocolVersion is rejected without changing state', (_label, message) => {
+  const originalWebSocket = global.WebSocket;
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+
+  try {
+    const { socket } = renderConnectedPrivateSession();
+    act(() => socket.onmessage?.({ data: JSON.stringify(message) }));
+
+    expect(screen.getByText('20')).toBeInTheDocument();
+    expect(screen.queryByText('99')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Connection status')).toHaveTextContent('Connected');
+    expect(screen.getByText(/unsupported protocol version/)).toBeInTheDocument();
+  } finally {
+    global.WebSocket = originalWebSocket;
   }
 });

@@ -170,6 +170,97 @@ test("private resume succeeds only with the automatically issued token", async (
   assert.equal(snapshot.sessionState.players.find((player) => player.playerId === created.playerId).connected, true);
 });
 
+test("a bound WebSocket rejects a second create without leaking a connected player", async (context) => {
+  const app = await startServer();
+  context.after(() => stopServer(app));
+  const observed = new Set();
+  const peer = await connect(app.url, observed);
+  peer.socket.send(JSON.stringify(request("createSession", {
+    clientId: randomUUID(), displayName: "Ada", roomMode: "friends",
+  })));
+  const created = await peer.next((message) => message.type === "sessionCreated");
+
+  peer.socket.send(JSON.stringify(request("createSession", {
+    clientId: randomUUID(), displayName: "Other Ada", roomMode: "private",
+  })));
+  const rejected = await peer.next((message) => message.type === "error");
+
+  assert.equal(rejected.errors[0].code, "ALREADY_JOINED");
+  assert.equal(app.manager.sessions.size, 1);
+  assert.equal(app.manager.sessions.get(created.sessionId).state.players.length, 1);
+
+  peer.socket.terminate();
+  await once(peer.socket, "close");
+  await waitFor(
+    () => app.manager.sessions.get(created.sessionId).state.players[0].connected === false,
+    "the original player remained connected after its bound socket closed",
+  );
+});
+
+test("a bound WebSocket rejects a second join and keeps its original binding", async (context) => {
+  const app = await startServer();
+  context.after(() => stopServer(app));
+  const observed = new Set();
+  const host = await connect(app.url, observed);
+  host.socket.send(JSON.stringify(request("createSession", {
+    clientId: randomUUID(), displayName: "Host", roomMode: "friends",
+  })));
+  const created = await host.next((message) => message.type === "sessionCreated");
+  const guest = await connect(app.url, observed);
+  guest.socket.send(JSON.stringify(request("joinSession", {
+    sessionId: created.sessionId, joinCode: created.joinCode, clientId: randomUUID(), displayName: "Guest",
+  })));
+  const joined = await guest.next((message) => message.type === "sessionJoined");
+
+  guest.socket.send(JSON.stringify(request("joinSession", {
+    sessionId: created.sessionId, joinCode: created.joinCode, clientId: randomUUID(), displayName: "Ghost",
+  })));
+  const rejected = await guest.next((message) => message.type === "error");
+
+  assert.equal(rejected.errors[0].code, "ALREADY_JOINED");
+  assert.equal(app.manager.sessions.get(created.sessionId).state.players.length, 2);
+
+  guest.socket.terminate();
+  await once(guest.socket, "close");
+  await waitFor(
+    () => app.manager.sessions.get(created.sessionId).state.players.find((player) => player.playerId === joined.playerId).connected === false,
+    "the originally joined player remained connected after its socket closed",
+  );
+});
+
+test("a resumed WebSocket rejects join and keeps the resumed player binding", async (context) => {
+  const app = await startServer();
+  context.after(() => stopServer(app));
+  const observed = new Set();
+  const first = await connect(app.url, observed);
+  first.socket.send(JSON.stringify(request("createSession", {
+    clientId: randomUUID(), displayName: "Ada", roomMode: "private",
+  })));
+  const created = await first.next((message) => message.type === "sessionCreated");
+  first.socket.terminate();
+  await once(first.socket, "close");
+
+  const resumed = await connect(app.url, observed);
+  resumed.socket.send(JSON.stringify(request("resumeSession", {
+    sessionId: created.sessionId, playerId: created.playerId, resumeToken: created.resumeToken,
+  })));
+  await resumed.next((message) => message.type === "stateSnapshot");
+  resumed.socket.send(JSON.stringify(request("joinSession", {
+    sessionId: created.sessionId, joinCode: created.joinCode, clientId: randomUUID(), displayName: "Ghost",
+  })));
+  const rejected = await resumed.next((message) => message.type === "error");
+
+  assert.equal(rejected.errors[0].code, "ALREADY_JOINED");
+  assert.equal(app.manager.sessions.get(created.sessionId).state.players.length, 1);
+
+  resumed.socket.terminate();
+  await once(resumed.socket, "close");
+  await waitFor(
+    () => app.manager.sessions.get(created.sessionId).state.players[0].connected === false,
+    "the resumed player remained connected after its socket closed",
+  );
+});
+
 for (const roomMode of ["friends", "private"]) {
   test(`${roomMode} keeps the replacement socket active until it closes`, async (context) => {
     const app = await startServer();
@@ -256,7 +347,7 @@ for (const roomMode of ["friends", "private"]) {
       staleResume.socket.send(JSON.stringify(request("resumeSession", {
         sessionId: created.sessionId, playerId: joined.playerId, resumeToken: oldToken,
       })));
-      assert.equal((await staleResume.next((message) => message.type === "error")).errors[0].code, "AUTHENTICATION_FAILED");
+      assert.equal((await staleResume.next((message) => message.type === "error")).errors[0].code, "PLAYER_NOT_FOUND");
       staleResume.socket.close();
     }
 

@@ -540,6 +540,7 @@ failures that are not mutation results. Mutation failures MUST use
 | `INVALID_JOIN_CODE` | 400 | `joinSession` | Join code is incorrect |
 | `PLAYER_NOT_FOUND` | 404 | Any action | Client is not in the session |
 | `SESSION_FULL` | 409 | `joinSession` | Session already contains 10 players |
+| `ALREADY_JOINED` | 409 | Create, join, resume | This WebSocket is already bound to a player/session |
 | `AUTHENTICATION_FAILED` | 401 | Resume, leave, mutation | Resume token is invalid, or connection/session/client identity does not match |
 | `NOT_JOINED` | 401 | Leave, mutation | The WebSocket has not joined or resumed a session |
 | `SESSION_MISMATCH` | 409 | Leave, mutation | The payload session differs from the WebSocket binding |
@@ -566,6 +567,9 @@ Each error object has:
   included in public session snapshots.
 - A successful `createSession` or `joinSession` binds that WebSocket connection
   to its `sessionId` and server-selected `playerId`.
+- One WebSocket connection can be bound to at most one player/session at a time.
+  A bound connection must leave its current session before another create, join,
+  or resume request; otherwise the server returns `ALREADY_JOINED`.
 - Each player has at most one active WebSocket. A new successful bind for the
   same session and player replaces the older connection; closing that replaced
   connection does not mark the player offline.
