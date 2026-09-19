@@ -5,15 +5,17 @@
 ```
 mars/
 ├── ios/
-│         └── terformingmars2/
+│         └── teraformingmars2/
 │              ├── Domain/
 │              │      ├── GameModel.swift
 │              │      └── GameReducer.swift
 │              ├── ContentView.swift
-│              ├── terformingmars2App.swift
-│              ├── terformingmars2.xcodeproj/
-│              ├── terformingmars2Tests/
-│              └── terformingmars2UITests/
+│              ├── AppViews.swift
+│              ├── GameViewModel.swift
+│              ├── teraformingmars2App.swift
+│              ├── teraformingmars2.xcodeproj/
+│              ├── teraformingmars2Tests/
+│              └── teraformingmars2UITests/
 ├── protocol/
 │         ├── schemas/
 │         └── fixtures/
@@ -37,11 +39,11 @@ mars/
 ## Architecture
 
 ```
-ContentView (UI)
+ContentView / AppViews (UI)
        ↓
 GameViewModel (@Observable)
        ↓
-GameReducer (Pure Functions)
+GameReducer (Pure Functions) ← MultiplayerClient (WebSocket)
        ↓
 UserDefaults (Persistence)
 ```
@@ -56,4 +58,5 @@ UserDefaults (Persistence)
 
 - Unit Test: `GameReducer` の全関数
 - UI Test: 基本的な画面表示
-- Web版の fixture と同じ JSON で検証
+- GameReducer、保存、接続待機、競合時の再試行、再接続をUnit Testで検証
+- UI Test: 基本的な画面表示と操作導線を検証

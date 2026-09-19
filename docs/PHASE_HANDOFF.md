@@ -242,7 +242,7 @@ UserDefaults (Persistence)
 | macOS | 26.3.1 |
 | Xcode | 26.6 |
 | Swift | 6.3.3 |
-| iOS デプロイターゲット | 15.6 |
+| iOS デプロイターゲット | 17.0 |
 | 最低対応バージョン | iOS 17.0 |
 | Device | iPhone + iPad |
 

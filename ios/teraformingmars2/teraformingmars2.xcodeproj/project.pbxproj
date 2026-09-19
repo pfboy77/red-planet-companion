@@ -11,6 +11,10 @@
 		2D0117603002DF8000A820F7 /* GameReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D0117553002DF8000A820F7 /* GameReducer.swift */; };
 		2D0117613002DF8000A820F7 /* GameModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D0117543002DF8000A820F7 /* GameModel.swift */; };
 		2D0117623002DF8000A820F7 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D0117533002DF8000A820F7 /* ContentView.swift */; };
+		C0D3A0010000000000000001 /* GameViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3A0020000000000000001 /* GameViewModel.swift */; };
+		C0D3A0030000000000000001 /* AppViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3A0040000000000000001 /* AppViews.swift */; };
+		C0D3A0070000000000000001 /* MultiplayerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3A0080000000000000001 /* MultiplayerClient.swift */; };
+		C0D3A0060000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = C0D3A0050000000000000001 /* PrivacyInfo.xcprivacy */; };
 		2D0117663002DF9500A820F7 /* teraformingmars2App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D0117633002DF9500A820F7 /* teraformingmars2App.swift */; };
 /* End PBXBuildFile section */
 
@@ -37,6 +41,10 @@
 		146C72422DB1445800A58C80 /* teraformingmars2UITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = teraformingmars2UITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		2D0117523002DF8000A820F7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2D0117533002DF8000A820F7 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		C0D3A0020000000000000001 /* GameViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameViewModel.swift; sourceTree = "<group>"; };
+		C0D3A0040000000000000001 /* AppViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViews.swift; sourceTree = "<group>"; };
+		C0D3A0050000000000000001 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		C0D3A0080000000000000001 /* MultiplayerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiplayerClient.swift; sourceTree = "<group>"; };
 		2D0117543002DF8000A820F7 /* GameModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameModel.swift; sourceTree = "<group>"; };
 		2D0117553002DF8000A820F7 /* GameReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GameReducer.swift; sourceTree = "<group>"; };
 		2D0117633002DF9500A820F7 /* teraformingmars2App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = teraformingmars2App.swift; sourceTree = "<group>"; };
@@ -85,6 +93,10 @@
 			children = (
 				2D0117523002DF8000A820F7 /* Assets.xcassets */,
 				2D0117533002DF8000A820F7 /* ContentView.swift */,
+				C0D3A0020000000000000001 /* GameViewModel.swift */,
+				C0D3A0040000000000000001 /* AppViews.swift */,
+				C0D3A0080000000000000001 /* MultiplayerClient.swift */,
+				C0D3A0050000000000000001 /* PrivacyInfo.xcprivacy */,
 				2D0117563002DF8000A820F7 /* Domain */,
 				2D0117633002DF9500A820F7 /* teraformingmars2App.swift */,
 				146C723B2DB1445800A58C80 /* teraformingmars2Tests */,
@@ -188,7 +200,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 1630;
-				LastUpgradeCheck = 1630;
+				LastUpgradeCheck = 2660;
 				TargetAttributes = {
 					146C722A2DB1445600A58C80 = {
 						CreatedOnToolsVersion = 16.3;
@@ -230,6 +242,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				2D01175F3002DF8000A820F7 /* Assets.xcassets in Resources */,
+				C0D3A0060000000000000001 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -258,6 +271,9 @@
 				2D0117603002DF8000A820F7 /* GameReducer.swift in Sources */,
 				2D0117613002DF8000A820F7 /* GameModel.swift in Sources */,
 				2D0117623002DF8000A820F7 /* ContentView.swift in Sources */,
+				C0D3A0010000000000000001 /* GameViewModel.swift in Sources */,
+				C0D3A0030000000000000001 /* AppViews.swift in Sources */,
+				C0D3A0070000000000000001 /* MultiplayerClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -326,6 +342,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = XK5LT394GN;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -349,6 +366,7 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -389,6 +407,8 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = XK5LT394GN;
+				ENABLE_CODE_COVERAGE = NO;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -405,6 +425,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};
@@ -417,17 +438,9 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = XK5LT394GN;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "同じネットワーク上のローカルゲームサーバーに接続します。";
-				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UIStatusBarStyle = "";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -449,17 +462,9 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = XK5LT394GN;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "同じネットワーク上のローカルゲームサーバーに接続します。";
-				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UIStatusBarStyle = "";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -480,7 +485,6 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = XK5LT394GN;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
@@ -499,7 +503,6 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = XK5LT394GN;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
@@ -517,7 +520,6 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = XK5LT394GN;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
@@ -535,7 +537,6 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = XK5LT394GN;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;

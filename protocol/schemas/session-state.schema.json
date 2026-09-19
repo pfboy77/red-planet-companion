@@ -8,10 +8,11 @@
     "protocolVersion",
     "sessionId",
     "joinCode",
+    "roomMode",
     "revision",
     "createdAt",
     "updatedAt",
-    "hostClientId",
+    "hostPlayerId",
     "players"
   ],
   "additionalProperties": false,
@@ -31,6 +32,11 @@
       "pattern": "^[A-Z0-9]{6}$",
       "description": "6-character uppercase join code for clients"
     },
+    "roomMode": {
+      "type": "string",
+      "enum": ["friends", "private"],
+      "description": "Reconnect policy selected by the host"
+    },
     "revision": {
       "type": "integer",
       "minimum": 0,
@@ -46,10 +52,10 @@
       "format": "date-time",
       "description": "Last update timestamp (ISO 8601)"
     },
-    "hostClientId": {
+    "hostPlayerId": {
       "type": "string",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-      "description": "Client ID of the session host"
+      "description": "Public player ID of the session host"
     },
     "players": {
       "type": "array",
@@ -63,18 +69,13 @@
   "definitions": {
     "playerState": {
       "type": "object",
-      "required": ["playerId", "clientId", "displayName", "connected", "lastSeenAt", "tr", "resources"],
+      "required": ["playerId", "displayName", "connected", "lastSeenAt", "revision", "tr", "resources"],
       "additionalProperties": false,
       "properties": {
         "playerId": {
           "type": "string",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
           "description": "Internal player identifier"
-        },
-        "clientId": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-          "description": "Client identifier"
         },
         "displayName": {
           "type": "string",
@@ -90,6 +91,11 @@
           "type": "string",
           "format": "date-time",
           "description": "Last seen timestamp (ISO 8601)"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Revision for this player's gameplay state"
         },
         "tr": {
           "type": "integer",

@@ -2,78 +2,43 @@ import Foundation
 
 // MARK: - Local multiplayer protocol
 
-struct MultiplayerResourceValue: Codable {
+struct MultiplayerResourceValue: Codable, Equatable {
     var amount: Int
     var production: Int
 }
 
-struct MultiplayerPlayer: Codable, Identifiable {
+enum RoomMode: String, Codable, CaseIterable {
+    case friends
+    case `private`
+}
+
+enum MultiplayerConnectionState: String {
+    case disconnected
+    case connecting
+    case joining
+    case connected
+    case reconnecting
+}
+
+struct MultiplayerPlayer: Codable, Identifiable, Equatable {
     let playerId: String
-    let clientId: String
     let displayName: String
     let connected: Bool
     let lastSeenAt: String
+    let revision: Int
     let tr: Int
     let resources: [String: MultiplayerResourceValue]
 
     var id: String { playerId }
 }
 
-struct MultiplayerSessionState: Codable {
+struct MultiplayerSessionState: Codable, Equatable {
     let sessionId: String
     let joinCode: String
+    let roomMode: RoomMode
     let revision: Int
+    let hostPlayerId: String
     let players: [MultiplayerPlayer]
-}
-
-/// Small URLSessionWebSocketTask wrapper shared by the iOS game view model.
-final class LocalMultiplayerClient {
-    var onMessage: (([String: Any]) -> Void)?
-    var onDisconnect: (() -> Void)?
-    private var task: URLSessionWebSocketTask?
-
-    var isConnected: Bool { task?.state == .running }
-
-    func connect(to url: URL) {
-        disconnect()
-        let nextTask = URLSession.shared.webSocketTask(with: url)
-        task = nextTask
-        nextTask.resume()
-        receive(from: nextTask)
-    }
-
-    func send(_ message: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: message),
-              let text = String(data: data, encoding: .utf8) else { return }
-        task?.send(.string(text)) { [weak self] error in
-            if error != nil { Task { @MainActor in self?.onDisconnect?() } }
-        }
-    }
-
-    func disconnect() {
-        task?.cancel(with: .normalClosure, reason: nil)
-        task = nil
-    }
-
-    private func receive(from task: URLSessionWebSocketTask) {
-        task.receive { [weak self] result in
-            Task { @MainActor in
-                guard let self else { return }
-                switch result {
-                case .success(let message):
-                    if case .string(let text) = message,
-                       let data = text.data(using: .utf8),
-                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        self.onMessage?(object)
-                    }
-                    self.receive(from: task)
-                case .failure:
-                    self.task = nil
-                    self.onDisconnect?()
-                }
-            }
-        }
-    }
 }
 
 // MARK: - Resource

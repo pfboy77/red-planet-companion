@@ -1,17 +1,12 @@
-import { v4 as uuidv4 } from "uuid";
 import ResourceCard from "./components/ResourceCard";
 import { Resource, GameState } from "./types";
-import React, { useState, useEffect } from "react";
-import { id, resourceIds, SessionState } from "./multiplayer";
+import React, { useState, useEffect, useRef } from "react";
+import { clearResumeCredentials, CONNECTION_REPLACED_CLOSE_CODE, ConnectionState, id, readResumeCredentials, resourceIds, ResumeCredentials, RoomMode, SessionState, validateWebSocketUrl, writeResumeCredentials } from "./multiplayer";
+import { createInitialResources } from "./game/model";
+import { changeResource, resetGame, runProduction } from "./game/reducer";
 
-const initialResources: Resource[] = [
-  { id: uuidv4(), name: "MC", amount: 0, production: 0, isMegaCredit: true },
-  { id: uuidv4(), name: "Steel", amount: 0, production: 0 },
-  { id: uuidv4(), name: "Titanium", amount: 0, production: 0 },
-  { id: uuidv4(), name: "Plants", amount: 0, production: 0 },
-  { id: uuidv4(), name: "Energy", amount: 0, production: 0, isEnergy: true },
-  { id: uuidv4(), name: "Heat", amount: 0, production: 0, isHeat: true }
-];
+const initialResources = createInitialResources();
+const leaveAcknowledgementTimeoutMs = 4000;
 
 const buttonStyle = {
   width: "32px",
@@ -47,39 +42,302 @@ function App() {
   const [displayName, setDisplayName] = useState("");
   const [joinSessionId, setJoinSessionId] = useState("");
   const [joinCode, setJoinCode] = useState("");
-  const [socket, setSocket] = useState<WebSocket | null>(null);
+  const [roomMode, setRoomMode] = useState<RoomMode>("friends");
   const [session, setSession] = useState<SessionState | null>(null);
+  const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
+  const [activePlayerId, setActivePlayerId] = useState<string | null>(() => readResumeCredentials()?.playerId ?? null);
+  const [actionPending, setActionPending] = useState(false);
+  const [isLeaving, setIsLeaving] = useState(false);
+  const [connectionReplaced, setConnectionReplaced] = useState(false);
   const [clientId] = useState(() => localStorage.getItem("multiplayerClientId") || id());
+  const socketRef = useRef<WebSocket | null>(null);
+  const resumeCredentialsRef = useRef<ResumeCredentials | null>(readResumeCredentials());
+  const intentionallyClosedRef = useRef(new WeakSet<WebSocket>());
+  const reconnectTimerRef = useRef<number | null>(null);
+  const leaveTimerRef = useRef<number | null>(null);
+  const pendingLeaveRef = useRef(false);
+  const leaveRequestSentRef = useRef(false);
+  const initialResumeAttemptedRef = useRef(false);
+  const pendingActionIdRef = useRef<string | null>(null);
+  const openConnectionRef = useRef<(url: string, afterOpen?: (connection: WebSocket) => void, resumeCredentials?: ResumeCredentials) => void>(() => {});
 
   useEffect(() => { localStorage.setItem("multiplayerClientId", clientId); }, [clientId]);
-  useEffect(() => () => socket?.close(), [socket]);
+  useEffect(() => () => {
+    if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+    if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current);
+    const current = socketRef.current;
+    if (current) { intentionallyClosedRef.current.add(current); current.close(); }
+  }, []);
 
-  const send = (message: Record<string, unknown>) => socket?.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ protocolVersion: "v1", requestId: id(), ...message }));
-  const connect = (afterOpen: (connection: WebSocket) => void) => {
-    if (!displayName.trim()) { setError("Enter your player name first."); return; }
-    socket?.close();
-    const next = new WebSocket(serverUrl);
-    next.onopen = () => { setError(null); afterOpen(next); };
+  const send = (message: Record<string, unknown>) => {
+    const current = socketRef.current;
+    if (!current || current.readyState !== WebSocket.OPEN) return false;
+    current.send(JSON.stringify({ protocolVersion: "v1", requestId: id(), ...message }));
+    return true;
+  };
+  const rememberResumeCredentials = (serverUrl: string, sessionId: string, playerId: string, nextRoomMode: RoomMode, resumeToken?: string) => {
+    const credentials = { serverUrl, sessionId, clientId, playerId, roomMode: nextRoomMode, ...(resumeToken ? { resumeToken } : {}) };
+    resumeCredentialsRef.current = credentials;
+    writeResumeCredentials(credentials);
+    setActivePlayerId(playerId);
+  };
+  const closeCurrentSocket = () => {
+    const current = socketRef.current;
+    if (!current) return;
+    intentionallyClosedRef.current.add(current);
+    current.close();
+    socketRef.current = null;
+  };
+  const clearReconnectTimer = () => {
+    if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = null;
+  };
+  const clearLeaveTimer = () => {
+    if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current);
+    leaveTimerRef.current = null;
+  };
+  const cancelLeaveAttempt = (message: string) => {
+    clearLeaveTimer();
+    pendingLeaveRef.current = false;
+    leaveRequestSentRef.current = false;
+    setIsLeaving(false);
+    setError(message);
+  };
+  const completeLeave = () => {
+    clearLeaveTimer();
+    clearReconnectTimer();
+    pendingLeaveRef.current = false;
+    leaveRequestSentRef.current = false;
+    closeCurrentSocket();
+    resumeCredentialsRef.current = null;
+    clearResumeCredentials();
+    pendingActionIdRef.current = null;
+    setActionPending(false);
+    setIsLeaving(false);
+    setConnectionReplaced(false);
+    setActivePlayerId(null);
+    setConnectionState("disconnected");
+    setSession(null);
+    setError(null);
+  };
+  const startLeaveTimer = () => {
+    clearLeaveTimer();
+    leaveTimerRef.current = window.setTimeout(() => {
+      cancelLeaveAttempt("Could not confirm leaving the session. Your reconnect credentials were kept; reconnect and try again.");
+    }, leaveAcknowledgementTimeoutMs);
+  };
+  const sendPendingLeave = (sessionId: string) => {
+    if (!pendingLeaveRef.current || leaveRequestSentRef.current) return false;
+    if (!send({ type: "leaveSession", sessionId })) return false;
+    leaveRequestSentRef.current = true;
+    startLeaveTimer();
+    return true;
+  };
+  const openConnection = (url: string, afterOpen?: (connection: WebSocket) => void, resumeCredentials?: ResumeCredentials) => {
+    if (!validateWebSocketUrl(url)) {
+      setConnectionState("disconnected");
+      setError("Enter a valid WebSocket URL beginning with ws:// or wss://.");
+      return;
+    }
+    closeCurrentSocket();
+    setConnectionReplaced(false);
+    setConnectionState(resumeCredentials ? "reconnecting" : "connecting");
+    let next: WebSocket;
+    try {
+      next = new WebSocket(url);
+    } catch {
+      setConnectionState("disconnected");
+      setError("Could not connect to the local server. Check the Server URL.");
+      return;
+    }
+    socketRef.current = next;
+    next.onopen = () => {
+      setConnectionState("joining");
+      if (resumeCredentials) {
+        const identity = resumeCredentials.roomMode === "private"
+          ? { playerId: resumeCredentials.playerId, resumeToken: resumeCredentials.resumeToken }
+          : { clientId: resumeCredentials.clientId };
+        next.send(JSON.stringify({ type: "resumeSession", protocolVersion: "v1", requestId: id(), sessionId: resumeCredentials.sessionId, ...identity }));
+      } else {
+        afterOpen?.(next);
+      }
+    };
     next.onerror = () => setError("Could not connect to the local server.");
     next.onmessage = (event) => {
-      const message = JSON.parse(event.data);
+      let message: any;
+      try { message = JSON.parse(event.data); }
+      catch { setError("The local server sent an invalid response."); return; }
+      if (!message || message.protocolVersion !== "v1") {
+        setError("The local server is using an unsupported protocol version.");
+        return;
+      }
       if (message.type === "sessionCreated") {
         setJoinSessionId(message.sessionId); setJoinCode(message.joinCode);
-        next.send(JSON.stringify({ type: "joinSession", protocolVersion: "v1", requestId: id(), sessionId: message.sessionId, joinCode: message.joinCode, clientId, displayName }));
+        setRoomMode(message.roomMode);
+        rememberResumeCredentials(url, message.sessionId, message.playerId, message.roomMode, message.resumeToken);
+        setSession(message.sessionState);
+        setConnectionState("connected");
+        setError(null);
+        return;
       }
-      if (message.sessionState) { setSession(message.sessionState); setError(null); }
-      if (message.type === "stateSnapshot") setSession(message.sessionState);
-      if (message.type === "error") setError(message.errors?.[0]?.message || "Server rejected the request.");
+      if (message.type === "sessionJoined") {
+        setRoomMode(message.roomMode);
+        rememberResumeCredentials(url, message.sessionId, message.playerId, message.roomMode, message.resumeToken);
+        return;
+      }
+      if (message.type === "stateSnapshot") {
+        setSession(message.sessionState);
+        setConnectionState("connected");
+        if (pendingLeaveRef.current && !sendPendingLeave(message.sessionState.sessionId)) {
+          cancelLeaveAttempt("Could not send the leave request. Your reconnect credentials were kept.");
+        }
+        return;
+      }
+      if (message.type === "sessionLeft") {
+        const credentials = resumeCredentialsRef.current;
+        if (credentials
+          && message.sessionId === credentials.sessionId
+          && message.playerId === credentials.playerId) completeLeave();
+        return;
+      }
+      if (message.type === "actionAccepted") {
+        setSession(message.sessionState);
+        if (message.actionId === pendingActionIdRef.current) {
+          pendingActionIdRef.current = null;
+          setActionPending(false);
+          setError(null);
+        }
+        return;
+      }
+      if (message.type === "actionRejected") {
+        const code = message.errors?.[0]?.code;
+        setError(code === "STALE_REVISION"
+          ? "Another update won the race. This action was not applied; the latest state is now shown."
+          : message.errors?.[0]?.message || "Server rejected the action.");
+        if (message.actionId === pendingActionIdRef.current) {
+          pendingActionIdRef.current = null;
+          setActionPending(false);
+        }
+        return;
+      }
+      if (message.type === "error") {
+        const code = message.errors?.[0]?.code;
+        const errorMessage = message.errors?.[0]?.message || "Server rejected the request.";
+        if (pendingLeaveRef.current && ["SESSION_NOT_FOUND", "PLAYER_NOT_FOUND"].includes(code)) {
+          completeLeave();
+          return;
+        }
+        if (pendingLeaveRef.current) {
+          cancelLeaveAttempt(`${errorMessage} Your reconnect credentials were kept.`);
+          setConnectionState("disconnected");
+          setSession(null);
+          return;
+        }
+        setError(errorMessage);
+        setConnectionState("disconnected");
+        if (["AUTHENTICATION_FAILED", "PLAYER_NOT_FOUND", "SESSION_NOT_FOUND"].includes(code)) {
+          resumeCredentialsRef.current = null;
+          clearResumeCredentials();
+          setSession(null);
+          setActivePlayerId(null);
+        }
+      }
     };
-    setSocket(next);
+    next.onclose = (event) => {
+      if (socketRef.current === next) socketRef.current = null;
+      if (intentionallyClosedRef.current.has(next)) return;
+      pendingActionIdRef.current = null;
+      setActionPending(false);
+      clearLeaveTimer();
+      leaveRequestSentRef.current = false;
+      setSession(null);
+      if (event?.code === CONNECTION_REPLACED_CLOSE_CODE) {
+        pendingLeaveRef.current = false;
+        setIsLeaving(false);
+        setConnectionReplaced(true);
+        setConnectionState("disconnected");
+        setError("This player is connected in another tab or device. Automatic reconnect was stopped.");
+        return;
+      }
+      setConnectionReplaced(false);
+      if (pendingLeaveRef.current) startLeaveTimer();
+      setError(pendingLeaveRef.current ? "Connection lost while leaving. Reconnecting to finish…" : "Connection lost. Reconnecting…");
+      const credentials = resumeCredentialsRef.current;
+      if (!credentials || reconnectTimerRef.current !== null) { setConnectionState("disconnected"); setSession(null); return; }
+      setConnectionState("reconnecting");
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        const latest = resumeCredentialsRef.current;
+        if (latest) openConnection(latest.serverUrl, undefined, latest);
+      }, 1000);
+    };
   };
-  const sharedPlayer = session?.players.find(player => player.clientId === clientId);
+  openConnectionRef.current = openConnection;
+  useEffect(() => {
+    if (initialResumeAttemptedRef.current) return;
+    initialResumeAttemptedRef.current = true;
+    const credentials = resumeCredentialsRef.current;
+    if (!credentials) return;
+    if (credentials.clientId !== clientId) {
+      resumeCredentialsRef.current = null;
+      clearResumeCredentials();
+      return;
+    }
+    setServerUrl(credentials.serverUrl);
+    setJoinSessionId(credentials.sessionId);
+    openConnectionRef.current(credentials.serverUrl, undefined, credentials);
+  }, [clientId]);
+  const connect = (afterOpen: (connection: WebSocket) => void) => {
+    if (!displayName.trim()) { setError("Enter your player name first."); return; }
+    resumeCredentialsRef.current = null;
+    clearResumeCredentials();
+    setActivePlayerId(null);
+    setSession(null);
+    setConnectionReplaced(false);
+    openConnection(serverUrl, afterOpen);
+  };
+  const sharedPlayer = session?.players.find(player => player.playerId === activePlayerId);
   const sharedResources = sharedPlayer ? resources.map(resource => ({ ...resource, amount: sharedPlayer.resources[resource.name as keyof typeof sharedPlayer.resources].amount, production: sharedPlayer.resources[resource.name as keyof typeof sharedPlayer.resources].production })) : resources;
-  const multiplayerAction = (type: string, values: Record<string, unknown>) => session && send({ type, sessionId: session.sessionId, clientId, actionId: id(), expectedRevision: session.revision, ...values });
-  const leaveGame = () => {
-    if (session) send({ type: "leaveSession", sessionId: session.sessionId, clientId });
-    socket?.close(); setSocket(null); setSession(null); setError(null);
+  const multiplayerAction = (type: string, values: Record<string, unknown>) => {
+    if (!session || !sharedPlayer || connectionState !== "connected") { setError("Reconnect to the local server before making changes."); return false; }
+    if (actionPending) return false;
+    const actionId = id();
+    pendingActionIdRef.current = actionId;
+    setActionPending(true);
+    if (send({ type, sessionId: session.sessionId, actionId, expectedRevision: sharedPlayer.revision, ...values })) return true;
+    pendingActionIdRef.current = null;
+    setActionPending(false);
+    setError("The action could not be sent. Reconnect and try again.");
+    return false;
   };
+  const leaveGame = () => {
+    if (isLeaving) return;
+    const credentials = resumeCredentialsRef.current;
+    if (!credentials) { setError("No reconnect credentials are available to confirm leaving this session."); return; }
+    pendingLeaveRef.current = true;
+    leaveRequestSentRef.current = false;
+    pendingActionIdRef.current = null;
+    setActionPending(false);
+    setIsLeaving(true);
+    setConnectionReplaced(false);
+    setError(null);
+    startLeaveTimer();
+    if (session && connectionState === "connected") {
+      if (!sendPendingLeave(session.sessionId)) cancelLeaveAttempt("Could not send the leave request. Your reconnect credentials were kept.");
+      return;
+    }
+    clearReconnectTimer();
+    openConnection(credentials.serverUrl, undefined, credentials);
+  };
+  const reconnectHere = () => {
+    const credentials = resumeCredentialsRef.current;
+    if (!credentials) { setError("No reconnect credentials are available."); return; }
+    setConnectionReplaced(false);
+    setError(null);
+    openConnection(credentials.serverUrl, undefined, credentials);
+  };
+  const multiplayerActive = activePlayerId !== null || connectionState !== "disconnected";
+  const multiplayerControlsDisabled = multiplayerActive && (connectionState !== "connected" || actionPending || isLeaving);
 
   useEffect(() => {
     const data = JSON.stringify({ resources, tr });
@@ -100,11 +358,11 @@ function App() {
     const delta = deltaValues[id] || 0;
     if (delta <= 0) return;
     const resource = sharedResources.find(item => item.id === id);
-    if (session && resource) { multiplayerAction("updateResource", { resourceId: resource.name, amount: delta, operation: "add" }); setDeltaValues({ ...deltaValues, [id]: 0 }); return; }
+    if (multiplayerActive && resource) { if (multiplayerAction("updateResource", { resourceId: resource.name, amount: delta, operation: "add" })) setDeltaValues({ ...deltaValues, [id]: 0 }); return; }
+    const next = changeResource({ resources, tr }, id, delta);
+    if (!next) return;
     saveState();
-    setResources(prev =>
-      prev.map(r => r.id === id ? { ...r, amount: r.amount + delta } : r)
-    );
+    setResources(next.resources);
     setDeltaValues({ ...deltaValues, [id]: 0 });
   };
 
@@ -117,39 +375,31 @@ function App() {
       setTimeout(() => setError(null), 2000);
       return;
     }
-    if (session) { multiplayerAction("updateResource", { resourceId: resource!.name, amount: resource!.amount - delta, operation: "set" }); setDeltaValues({ ...deltaValues, [id]: 0 }); return; }
+    if (multiplayerActive) { if (multiplayerAction("updateResource", { resourceId: resource!.name, amount: resource!.amount - delta, operation: "set" })) setDeltaValues({ ...deltaValues, [id]: 0 }); return; }
+    const next = changeResource({ resources, tr }, id, -delta);
+    if (!next) return;
     saveState();
-    setResources(prev =>
-      prev.map(r => r.id === id ? { ...r, amount: r.amount - delta } : r)
-    );
+    setResources(next.resources);
     setDeltaValues({ ...deltaValues, [id]: 0 });
   };
 
   const handleProduction = () => {
-    if (session) { multiplayerAction("runProduction", {}); return; }
+    if (multiplayerActive) { multiplayerAction("runProduction", {}); return; }
     saveState();
-    let newResources = resources.map(resource => ({ ...resource }));
-    const energy = newResources.find(r => r.isEnergy);
-    const heat = newResources.find(r => r.isHeat);
-    if (energy && heat) {
-      heat.amount += energy.amount;
-      energy.amount = 0;
-    }
-    newResources = newResources.map(r => ({
-      ...r,
-      amount: r.amount + r.production + (r.isMegaCredit ? tr : 0)
-    }));
-    setResources(newResources);
+    const next = runProduction({ resources, tr });
+    setResources(next.resources);
   };
 
   const handleReset = () => {
-    if (session) { multiplayerAction("resetPlayer", {}); return; }
+    if (multiplayerActive) { multiplayerAction("resetPlayer", {}); return; }
     saveState();
-    setResources(resources.map(r => ({ ...r, amount: 0, production: 0 })));
-    setTr(20);
+    const next = resetGame({ resources, tr });
+    setResources(next.resources);
+    setTr(next.tr);
   };
 
   const handleUndo = () => {
+    if (multiplayerActive) return;
     const last = undoStack[undoStack.length - 1];
     if (last) {
       setUndoStack(undoStack.slice(0, -1));
@@ -160,6 +410,7 @@ function App() {
   };
 
   const handleRedo = () => {
+    if (multiplayerActive) return;
     const next = redoStack[redoStack.length - 1];
     if (next) {
       setRedoStack(redoStack.slice(0, -1));
@@ -173,7 +424,7 @@ function App() {
     const currentTR = sharedPlayer?.tr ?? tr;
     const nextTR = Math.max(0, Math.min(currentTR + delta, 100));
     if (nextTR === currentTR) return;
-    if (session) { multiplayerAction("updateTR", { tr: nextTR }); return; }
+    if (multiplayerActive) { multiplayerAction("updateTR", { tr: nextTR }); return; }
     saveState();
     setTr(nextTR);
   };
@@ -181,11 +432,18 @@ function App() {
   const handleProductionChange = (id: string, value: number) => {
     const resource = sharedResources.find(item => item.id === id);
     if (!resource || resource.production === value) return;
-    if (session) { multiplayerAction("updateProduction", { resourceId: resource.name, production: value }); return; }
+    if (multiplayerActive) { multiplayerAction("updateProduction", { resourceId: resource.name, production: value }); return; }
     saveState();
     setResources(previous =>
       previous.map(item => item.id === id ? { ...item, production: value } : item)
     );
+  };
+  const connectionLabel: Record<ConnectionState, string> = {
+    disconnected: "Disconnected",
+    connecting: "Connecting…",
+    joining: "Joining…",
+    connected: "Connected",
+    reconnecting: "Reconnecting…",
   };
 
   return (
@@ -195,8 +453,19 @@ function App() {
         <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
           <input aria-label="Server URL" value={serverUrl} onChange={e => setServerUrl(e.target.value)} placeholder="ws://192.168.x.x:8080/ws" />
           <input aria-label="Player name" value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Your name" maxLength={20} />
-          {!session && <><button onClick={() => connect(connection => connection.send(JSON.stringify({ type: "createSession", protocolVersion: "v1", requestId: id() })))}>Create game</button><input aria-label="Session ID" value={joinSessionId} onChange={e => setJoinSessionId(e.target.value)} placeholder="Session ID" /><input aria-label="Join code" value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())} placeholder="Join code" maxLength={6} /><button onClick={() => connect(connection => connection.send(JSON.stringify({ type: "joinSession", protocolVersion: "v1", requestId: id(), sessionId: joinSessionId, joinCode, clientId, displayName })))}>Join game</button></>}
-          {session && <div>Connected — session ID: <strong>{session.sessionId}</strong> · code: <strong>{session.joinCode}</strong> · revision {session.revision} <button onClick={leaveGame}>Leave game</button></div>}
+          <div aria-label="Connection status">{connectionLabel[connectionState]}</div>
+          {!multiplayerActive && <>
+            <fieldset>
+              <legend>Room mode</legend>
+              <label><input type="radio" name="roomMode" value="friends" checked={roomMode === "friends"} onChange={() => setRoomMode("friends")} /> Friends — easy joining on a trusted LAN</label>
+              <label style={{ display: "block" }}><input type="radio" name="roomMode" value="private" checked={roomMode === "private"} onChange={() => setRoomMode("private")} /> Private — stronger automatic reconnect identity</label>
+            </fieldset>
+            <button onClick={() => connect(connection => connection.send(JSON.stringify({ type: "createSession", protocolVersion: "v1", requestId: id(), clientId, displayName: displayName.trim(), roomMode })))}>Create game</button>
+            <input aria-label="Session ID" value={joinSessionId} onChange={e => setJoinSessionId(e.target.value)} placeholder="Session ID" />
+            <input aria-label="Join code" value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())} placeholder="Join code" maxLength={6} />
+            <button onClick={() => connect(connection => connection.send(JSON.stringify({ type: "joinSession", protocolVersion: "v1", requestId: id(), sessionId: joinSessionId, joinCode, clientId, displayName: displayName.trim() })))}>Join game</button>
+          </>}
+          {multiplayerActive && <div>{session && <>session ID: <strong>{session.sessionId}</strong> · code: <strong>{session.joinCode}</strong> · {session.roomMode} · revision {session.revision} </>}<button onClick={leaveGame} disabled={isLeaving}>{isLeaving ? "Leaving…" : "Leave game"}</button>{connectionReplaced && <button onClick={reconnectHere}>Reconnect here</button>}</div>}
         </div>
       </section>
       <div
@@ -208,13 +477,14 @@ function App() {
           marginBottom: 16,
         }}
       >
-        <button onClick={handleUndo} disabled={undoStack.length === 0}>↩︎ Undo</button>
-        <button onClick={handleRedo} disabled={redoStack.length === 0}>↪︎ Redo</button>
+        <button onClick={handleUndo} disabled={multiplayerActive || undoStack.length === 0}>↩︎ Undo</button>
+        <button onClick={handleRedo} disabled={multiplayerActive || redoStack.length === 0}>↪︎ Redo</button>
 
         <div style={{ display: "inline-flex", alignItems: "center", marginLeft: 8 }}>
           <span>TR:</span>
           <button
             onClick={() => handleTRChange(-1)}
+            disabled={multiplayerControlsDisabled}
             aria-label="Decrease TR"
             style={{ ...buttonStyle, marginRight: 4 }}
           >
@@ -223,6 +493,7 @@ function App() {
           <span>{sharedPlayer?.tr ?? tr}</span>
           <button
             onClick={() => handleTRChange(1)}
+            disabled={multiplayerControlsDisabled}
             aria-label="Increase TR"
             style={{ ...buttonStyle, marginLeft: 4 }}
           >
@@ -230,10 +501,10 @@ function App() {
           </button>
         </div>
 
-        <button onClick={handleProduction} style={{ backgroundColor: "#007bff", color: "white", padding: "4px 8px", borderRadius: 4 }}>
+        <button onClick={handleProduction} disabled={multiplayerControlsDisabled} style={{ backgroundColor: "#007bff", color: "white", padding: "4px 8px", borderRadius: 4 }}>
           ▶︎ Production
         </button>
-        <button onClick={handleReset} style={{ backgroundColor: "red", color: "white", padding: "4px 8px", borderRadius: 4 }}>
+        <button onClick={handleReset} disabled={multiplayerControlsDisabled} style={{ backgroundColor: "red", color: "white", padding: "4px 8px", borderRadius: 4 }}>
           Reset
         </button>
       </div>
@@ -257,10 +528,11 @@ function App() {
             addAmount={() => handleAdd(resource.id)}
             subtractAmount={() => handleSubtract(resource.id)}
             updateProduction={val => handleProductionChange(resource.id, val)}
+            disabled={multiplayerControlsDisabled}
           />
         ))}
       </div>
-      {session && <section style={{ marginTop: 20 }}><h3>Other players’ resources</h3>{session.players.filter(player => player.clientId !== clientId).map(player => <div key={player.playerId} style={{ borderTop: "1px solid #ddd", padding: "8px 0" }}><strong>{player.displayName}</strong> {player.connected ? "● online" : "○ offline"} · TR {player.tr}<div>{resourceIds.map(name => `${name}: ${player.resources[name].amount} (${player.resources[name].production >= 0 ? "+" : ""}${player.resources[name].production})`).join(" · ")}</div></div>)}</section>}
+      {session && <section style={{ marginTop: 20 }}><h3>Other players’ resources</h3>{session.players.filter(player => player.playerId !== activePlayerId).map(player => <div key={player.playerId} style={{ borderTop: "1px solid #ddd", padding: "8px 0" }}><strong>{player.displayName}</strong> {player.connected ? "● online" : "○ offline"} · TR {player.tr}<div>{resourceIds.map(name => `${name}: ${player.resources[name].amount} (${player.resources[name].production >= 0 ? "+" : ""}${player.resources[name].production})`).join(" · ")}</div></div>)}</section>}
     </div>
   );
 }

@@ -3,7 +3,6 @@
     "protocolVersion": "v1",
     "requestId": "c3d4e5f6-a7b8-9012-cdef-123456789013",
     "sessionId": "c3d4e5f6-a7b8-9012-cdef-123456789012",
-    "clientId": "d4e5f6a7-b8c9-0123-defa-234567890123",
     "actionId": "d4e5f6a7-b8c9-0123-defa-234567890124",
     "expectedRevision": 12
 }

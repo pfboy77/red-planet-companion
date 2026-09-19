@@ -67,9 +67,32 @@
                     "$ref": "#/definitions/_baseClient"
                 },
                 {
+                    "not": {
+                        "required": ["resumeToken"]
+                    }
+                },
+                {
+                    "required": [
+                        "clientId",
+                        "displayName",
+                        "roomMode"
+                    ],
                     "properties": {
                         "type": {
                             "const": "createSession"
+                        },
+                        "clientId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        "displayName": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 20
+                        },
+                        "roomMode": {
+                            "type": "string",
+                            "enum": ["friends", "private"]
                         }
                     }
                 }
@@ -79,6 +102,11 @@
             "allOf": [
                 {
                     "$ref": "#/definitions/_baseClient"
+                },
+                {
+                    "not": {
+                        "required": ["resumeToken"]
+                    }
                 },
                 {
                     "required": [
@@ -118,9 +146,13 @@
                     "$ref": "#/definitions/_baseClient"
                 },
                 {
+                    "not": {
+                        "required": ["resumeToken"]
+                    }
+                },
+                {
                     "required": [
-                        "sessionId",
-                        "clientId"
+                        "sessionId"
                     ],
                     "properties": {
                         "type": {
@@ -144,9 +176,10 @@
                     "$ref": "#/definitions/_baseClient"
                 },
                 {
-                    "required": [
-                        "sessionId",
-                        "clientId"
+                    "required": ["sessionId"],
+                    "oneOf": [
+                        { "required": ["clientId"], "not": { "required": ["playerId"] } },
+                        { "required": ["playerId", "resumeToken"], "not": { "required": ["clientId"] } }
                     ],
                     "properties": {
                         "type": {
@@ -159,6 +192,16 @@
                         "clientId": {
                             "type": "string",
                             "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        "playerId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                        },
+                        "resumeToken": {
+                            "type": "string",
+                            "minLength": 32,
+                            "maxLength": 256,
+                            "pattern": "^[A-Za-z0-9_-]+$"
                         }
                     }
                 }
@@ -170,7 +213,13 @@
                     "$ref": "#/definitions/_baseClient"
                 },
                 {
+                    "not": {
+                        "required": ["resumeToken"]
+                    }
+                },
+                {
                     "required": [
+                        "sessionId",
                         "actionId",
                         "expectedRevision",
                         "resourceId",
@@ -229,7 +278,13 @@
                     "$ref": "#/definitions/_baseClient"
                 },
                 {
+                    "not": {
+                        "required": ["resumeToken"]
+                    }
+                },
+                {
                     "required": [
+                        "sessionId",
                         "actionId",
                         "expectedRevision",
                         "resourceId",
@@ -272,6 +327,25 @@
                             "maximum": 20
                         }
                     }
+                },
+                {
+                    "if": {
+                        "required": [
+                            "resourceId"
+                        ],
+                        "properties": {
+                            "resourceId": {
+                                "const": "MC"
+                            }
+                        }
+                    },
+                    "else": {
+                        "properties": {
+                            "production": {
+                                "minimum": 0
+                            }
+                        }
+                    }
                 }
             ]
         },
@@ -281,7 +355,13 @@
                     "$ref": "#/definitions/_baseClient"
                 },
                 {
+                    "not": {
+                        "required": ["resumeToken"]
+                    }
+                },
+                {
                     "required": [
+                        "sessionId",
                         "actionId",
                         "expectedRevision",
                         "tr"
@@ -321,7 +401,13 @@
                     "$ref": "#/definitions/_baseClient"
                 },
                 {
+                    "not": {
+                        "required": ["resumeToken"]
+                    }
+                },
+                {
                     "required": [
+                        "sessionId",
                         "actionId",
                         "expectedRevision"
                     ],
@@ -355,7 +441,13 @@
                     "$ref": "#/definitions/_baseClient"
                 },
                 {
+                    "not": {
+                        "required": ["resumeToken"]
+                    }
+                },
+                {
                     "required": [
+                        "sessionId",
                         "actionId",
                         "expectedRevision"
                     ],
@@ -410,6 +502,10 @@
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
                 },
+                "playerId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
                 "actionId": {
                     "type": "string",
                     "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -448,6 +544,16 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 20
+                },
+                "roomMode": {
+                    "type": "string",
+                    "enum": ["friends", "private"]
+                },
+                "resumeToken": {
+                    "type": "string",
+                    "minLength": 32,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9_-]+$"
                 },
                 "production": {
                     "type": "integer",

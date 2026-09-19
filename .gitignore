@@ -1,6 +1,5 @@
 # iOS Xcode user data
-ios/**/*.xcuserdata/
-ios/**/*.xcuserdata/*
+ios/**/xcuserdata/
 
 # macOS
 .DS_Store
