@@ -684,6 +684,72 @@ struct ViewModelTests {
         #expect(resume["sessionId"] as? String == testSessionID)
     }
 
+    @Test func legacyServerURLMigratesToSelectedServerProfile() {
+        let defaults = isolatedDefaults()
+        defaults.set("ws://192.168.1.20:8080/ws", forKey: "MultiplayerServerURL")
+
+        let vm = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: InMemoryResumeTokenStore())
+
+        #expect(vm.serverProfiles.count == 1)
+        #expect(vm.serverProfiles[0].name == "Migrated Server")
+        #expect(vm.serverProfiles[0].webSocketURL == "ws://192.168.1.20:8080/ws")
+        #expect(vm.selectedServerID == vm.serverProfiles[0].id)
+        #expect(vm.serverURL == vm.serverProfiles[0].webSocketURL)
+    }
+
+    @Test func serverProfilesSupportAddEditDeleteSelectAndPersistence() {
+        let defaults = isolatedDefaults()
+        let vm = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: InMemoryResumeTokenStore())
+
+        #expect(vm.saveServerProfile(id: nil, name: "Home Server", webSocketURL: "wss://mars.example.com/ws") == nil)
+        #expect(vm.saveServerProfile(id: nil, name: "Development Mac", webSocketURL: "ws://192.168.1.20:8080/ws") == nil)
+        #expect(vm.serverProfiles.count == 2)
+        let homeID = vm.serverProfiles[0].id
+        let developmentID = vm.serverProfiles[1].id
+        vm.selectServerProfile(id: developmentID)
+        #expect(vm.selectedServerID == developmentID)
+        #expect(vm.serverURL == "ws://192.168.1.20:8080/ws")
+
+        #expect(vm.saveServerProfile(id: developmentID, name: "Development Server", webSocketURL: "ws://10.0.0.5:8080/ws") == nil)
+        vm.deleteServerProfile(id: homeID)
+        #expect(vm.serverProfiles.map(\.name) == ["Development Server"])
+
+        let restored = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: InMemoryResumeTokenStore())
+        #expect(restored.serverProfiles.map(\.name) == ["Development Server"])
+        #expect(restored.selectedServerID == developmentID)
+        #expect(restored.serverURL == "ws://10.0.0.5:8080/ws")
+    }
+
+    @Test func privateResumeCredentialCannotBeSentToAnotherServerProfile() {
+        let defaults = isolatedDefaults()
+        let client = FakeMultiplayerClient()
+        let tokenStore = InMemoryResumeTokenStore()
+        let vm = connectedViewModel(defaults: defaults, client: client, multiplayerTR: 20, tokenStore: tokenStore)
+        let originalServerID = vm.selectedServerID
+        client.failConnection()
+        #expect(vm.canResumeSession)
+
+        #expect(vm.saveServerProfile(id: nil, name: "Other Server", webSocketURL: "wss://other.example.com/ws") == nil)
+        let otherServerID = vm.serverProfiles.first { $0.name == "Other Server" }!.id
+        vm.selectServerProfile(id: otherServerID)
+        let connectionCount = client.connectedURLs.count
+
+        #expect(!vm.canResumeSession)
+        vm.resumeMultiplayerGame()
+        #expect(client.connectedURLs.count == connectionCount)
+        #expect(vm.multiplayerError?.contains("再接続") == true)
+
+        vm.selectServerProfile(id: originalServerID!)
+        #expect(vm.canResumeSession)
+    }
+
+    @Test func serverProfileValidationRejectsInvalidNameAndURL() {
+        let vm = GameViewModel(defaults: isolatedDefaults(), multiplayerClient: FakeMultiplayerClient(), tokenStore: InMemoryResumeTokenStore())
+        #expect(vm.saveServerProfile(id: nil, name: "", webSocketURL: "ws://localhost:8080/ws") != nil)
+        #expect(vm.saveServerProfile(id: nil, name: "Bad", webSocketURL: "https://example.com") != nil)
+        #expect(vm.serverProfiles.isEmpty)
+    }
+
     private var testSessionID: String { "00000000-0000-4000-8000-000000000111" }
     private var testResumeToken: String { "00000000-0000-4000-8000-000000000222" }
     private var testPlayerID: String { "00000000-0000-4000-8000-000000000333" }

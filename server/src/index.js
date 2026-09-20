@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
+import { resolveDatabasePath } from "./database.js";
 import { peerAuthorizationError } from "./peer-authorization.js";
 import { SessionManager } from "./session-manager.js";
 import { formatClientMessageValidationError, mutationTypes, validateClientMessage } from "./validator.js";
@@ -8,12 +9,21 @@ import { formatClientMessageValidationError, mutationTypes, validateClientMessag
 const timestamped = (message) => ({ protocolVersion: "v1", timestamp: new Date().toISOString(), ...message });
 export const CONNECTION_REPLACED_CLOSE_CODE = 4001;
 
-export function createLocalServer({ manager = new SessionManager() } = {}) {
+export function createLocalServer({ manager: providedManager, databasePath = resolveDatabasePath(), serverName } = {}) {
+  const manager = providedManager ?? new SessionManager({ databasePath, serverName });
   const peers = new Set();
   const server = createServer((request, response) => {
     if (request.url === "/health") {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ status: "ok" }));
+      response.writeHead(200, {
+        "access-control-allow-origin": "*",
+        "content-type": "application/json",
+      });
+      response.end(JSON.stringify({
+        status: "ok",
+        serverId: manager.serverMetadata.serverId,
+        serverName: manager.serverMetadata.serverName,
+        protocolVersion: "v1",
+      }));
       return;
     }
     response.writeHead(404);
@@ -166,7 +176,8 @@ export function createLocalServer({ manager = new SessionManager() } = {}) {
       }
       try {
         return handle(peer, message);
-      } catch {
+      } catch (failure) {
+        console.error("WebSocket request failed", failure);
         return reject(peer, { code: "INTERNAL_ERROR", message: "The server could not process this request" });
       }
     });
@@ -181,13 +192,42 @@ export function createLocalServer({ manager = new SessionManager() } = {}) {
     socket.on("error", () => undefined);
   });
 
-  return { server, webSocketServer, manager, peers };
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    for (const peer of peers) peer.socket.close(1001, "Server shutting down");
+    await Promise.all([
+      new Promise((resolve) => webSocketServer.close(resolve)),
+      new Promise((resolve, rejectClose) => {
+        if (!server.listening) return resolve();
+        server.close((failure) => failure ? rejectClose(failure) : resolve());
+      }),
+    ]);
+    manager.close();
+  };
+
+  return { server, webSocketServer, manager, peers, close };
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const port = Number(process.env.PORT || 8080);
   const host = process.env.HOST || "0.0.0.0";
-  const { server } = createLocalServer();
-  server.listen(port, host, () => console.log(`Red Planet local server listening on ws://${host}:${port}/ws`));
+  const app = createLocalServer();
+  app.server.listen(port, host, () => console.log(`Red Planet server listening on ws://${host}:${port}/ws`));
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`Received ${signal}; closing Red Planet server`);
+    try {
+      await app.close();
+    } catch (failure) {
+      console.error("Graceful shutdown failed", failure);
+      process.exitCode = 1;
+    }
+  };
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
 }

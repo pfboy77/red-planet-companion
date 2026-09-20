@@ -1,4 +1,8 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { openDatabase } from "./database.js";
+import { ActionRepository } from "./repositories/action-repository.js";
+import { PlayerRepository } from "./repositories/player-repository.js";
+import { SessionRepository } from "./repositories/session-repository.js";
 
 export const RESOURCE_IDS = ["MC", "Steel", "Titanium", "Plants", "Energy", "Heat"];
 export const ROOM_MODES = ["friends", "private"];
@@ -23,8 +27,44 @@ const createPlayer = (displayName) => ({
   resources: resources(),
 });
 
+export const hashResumeToken = (token) => createHash("sha256").update(token).digest("hex");
+
+const validToken = (token, storedHash) => {
+  if (typeof token !== "string" || typeof storedHash !== "string") return false;
+  const actual = Buffer.from(hashResumeToken(token), "hex");
+  const expected = Buffer.from(storedHash, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+};
+
+const fingerprint = (message) => JSON.stringify(Object.fromEntries(
+  Object.entries(message)
+    .filter(([key]) => key !== "requestId" && key !== "protocolVersion")
+    .sort(([left], [right]) => left.localeCompare(right)),
+));
+
+class RepositorySessionView {
+  constructor(manager) {
+    this.manager = manager;
+  }
+
+  get size() { return this.manager.sessionRepository.count(); }
+  has(sessionId) { return this.manager.sessionRepository.has(sessionId); }
+  get(sessionId) { return this.manager.inspectSession(sessionId); }
+}
+
 export class SessionManager {
-  constructor() { this.sessions = new Map(); }
+  constructor({ databasePath = ":memory:", serverName } = {}) {
+    const opened = openDatabase({ databasePath, serverName });
+    this.database = opened.database;
+    this.databasePath = opened.databasePath;
+    this.serverMetadata = opened.metadata;
+    this.sessionRepository = new SessionRepository(this.database);
+    this.playerRepository = new PlayerRepository(this.database, RESOURCE_IDS);
+    this.actionRepository = new ActionRepository(this.database);
+    this.stateProjections = new Map();
+    this.sessions = new RepositorySessionView(this);
+    this.closed = false;
+  }
 
   createSession({ clientId, displayName, roomMode = "friends" }) {
     if (!validIdentity(clientId, displayName) || !ROOM_MODES.includes(roomMode)) {
@@ -33,114 +73,169 @@ export class SessionManager {
     const timestamp = now();
     const host = createPlayer(displayName);
     const state = {
-      protocolVersion: "v1", sessionId: randomUUID(), joinCode: joinCode(), roomMode,
-      revision: 0, createdAt: timestamp, updatedAt: timestamp, hostPlayerId: host.playerId, players: [host],
-    };
-    const session = {
-      state, actions: new Map(), clientPlayers: new Map([[clientId, host.playerId]]), credentials: new Map(),
+      protocolVersion: "v1",
+      sessionId: randomUUID(),
+      joinCode: joinCode(),
+      roomMode,
+      revision: 0,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      hostPlayerId: host.playerId,
+      players: [host],
     };
     const resumeToken = roomMode === "private" ? newResumeToken() : undefined;
-    if (resumeToken) session.credentials.set(host.playerId, resumeToken);
-    this.sessions.set(state.sessionId, session);
-    return { state, player: host, resumeToken };
+    this.database.transaction(() => {
+      this.sessionRepository.insert(state);
+      this.playerRepository.insert(
+        state.sessionId,
+        host,
+        clientId,
+        resumeToken ? hashResumeToken(resumeToken) : undefined,
+        timestamp,
+      );
+    })();
+    const committed = this.publishState(this.loadState(state.sessionId));
+    return { state: committed, player: this.findPlayer(committed, host.playerId), resumeToken };
   }
 
   join({ sessionId, joinCode: code, clientId, displayName }) {
-    if (!validIdentity(clientId, displayName)) return { error: error("INVALID_MESSAGE", "clientId must be a UUID and displayName must contain 1 to 20 characters") };
-    const session = this.sessions.get(sessionId);
-    if (!session) return { error: error("SESSION_NOT_FOUND", "Session does not exist") };
-    if (session.state.joinCode !== code) return { error: error("INVALID_JOIN_CODE", "Join code is incorrect") };
-    const existingPlayerId = session.clientPlayers.get(clientId);
-    if (existingPlayerId) {
-      if (session.state.roomMode === "private") return { error: error("AUTHENTICATION_FAILED", "Use the private resume token to reconnect this player") };
-      const existing = this.findPlayer(session, existingPlayerId);
-      this.markConnected(session, existing);
-      return { state: session.state, player: existing, rejoined: true };
+    if (!validIdentity(clientId, displayName)) {
+      return { error: error("INVALID_MESSAGE", "clientId must be a UUID and displayName must contain 1 to 20 characters") };
     }
-    if (session.state.players.length >= 10) return { error: error("SESSION_FULL", "A session can contain at most 10 players") };
+    const state = this.loadState(sessionId);
+    if (!state) return { error: error("SESSION_NOT_FOUND", "Session does not exist") };
+    if (state.joinCode !== code) return { error: error("INVALID_JOIN_CODE", "Join code is incorrect") };
+    const existingPlayerId = this.playerRepository.findByClient(sessionId, clientId);
+    if (existingPlayerId) {
+      if (state.roomMode === "private") {
+        return { error: error("AUTHENTICATION_FAILED", "Use the private resume token to reconnect this player") };
+      }
+      this.markConnected(sessionId, existingPlayerId);
+      const committed = this.publishState(this.loadState(sessionId));
+      return { state: committed, player: this.findPlayer(committed, existingPlayerId), rejoined: true };
+    }
+    if (state.players.length >= 10) return { error: error("SESSION_FULL", "A session can contain at most 10 players") };
+
+    const timestamp = now();
     const joinedPlayer = createPlayer(displayName);
-    session.state.players.push(joinedPlayer);
-    session.clientPlayers.set(clientId, joinedPlayer.playerId);
-    const resumeToken = session.state.roomMode === "private" ? newResumeToken() : undefined;
-    if (resumeToken) session.credentials.set(joinedPlayer.playerId, resumeToken);
-    this.touchSession(session);
-    return { state: session.state, player: joinedPlayer, resumeToken, rejoined: false };
+    const resumeToken = state.roomMode === "private" ? newResumeToken() : undefined;
+    this.database.transaction(() => {
+      this.playerRepository.insert(
+        sessionId,
+        joinedPlayer,
+        clientId,
+        resumeToken ? hashResumeToken(resumeToken) : undefined,
+        timestamp,
+      );
+      this.sessionRepository.touch(sessionId, timestamp);
+    })();
+    const committed = this.publishState(this.loadState(sessionId));
+    return {
+      state: committed,
+      player: this.findPlayer(committed, joinedPlayer.playerId),
+      resumeToken,
+      rejoined: false,
+    };
   }
 
   resume({ sessionId, clientId, playerId, resumeToken }) {
-    const session = this.sessions.get(sessionId);
-    if (!session) return { error: error("SESSION_NOT_FOUND", "Session does not exist") };
+    const state = this.loadState(sessionId);
+    if (!state) return { error: error("SESSION_NOT_FOUND", "Session does not exist") };
     let authenticatedPlayerId;
-    if (session.state.roomMode === "friends") {
-      authenticatedPlayerId = session.clientPlayers.get(clientId);
+    if (state.roomMode === "friends") {
+      authenticatedPlayerId = this.playerRepository.findByClient(sessionId, clientId);
       if (!authenticatedPlayerId) return { error: error("PLAYER_NOT_FOUND", "Player is not in this session") };
     } else {
-      if (!this.findPlayer(session, playerId)) return { error: error("PLAYER_NOT_FOUND", "Player is not in this session") };
-      if (!resumeToken || session.credentials.get(playerId) !== resumeToken) return { error: error("AUTHENTICATION_FAILED", "Resume token is invalid") };
+      if (!this.findPlayer(state, playerId)) return { error: error("PLAYER_NOT_FOUND", "Player is not in this session") };
+      if (!validToken(resumeToken, this.playerRepository.credentialHash(playerId))) {
+        return { error: error("AUTHENTICATION_FAILED", "Resume token is invalid") };
+      }
       authenticatedPlayerId = playerId;
     }
-    const player = this.findPlayer(session, authenticatedPlayerId);
-    if (!player) return { error: error("PLAYER_NOT_FOUND", "Player is not in this session") };
-    this.markConnected(session, player);
-    return { state: session.state, player };
+    this.markConnected(sessionId, authenticatedPlayerId);
+    const committed = this.publishState(this.loadState(sessionId));
+    return { state: committed, player: this.findPlayer(committed, authenticatedPlayerId) };
   }
 
   disconnect(sessionId, playerId) {
-    const session = this.sessions.get(sessionId);
-    const player = this.findPlayer(session, playerId);
-    if (!session || !player || !player.connected) return undefined;
-    player.connected = false;
-    player.lastSeenAt = now();
-    this.touchSession(session);
-    return { state: session.state, player };
+    if (!sessionId || !playerId) return undefined;
+    const state = this.loadState(sessionId);
+    const player = this.findPlayer(state, playerId);
+    if (!state || !player || !player.connected) return undefined;
+    const timestamp = now();
+    this.database.transaction(() => {
+      this.playerRepository.setConnected(playerId, false, timestamp);
+      this.sessionRepository.touch(sessionId, timestamp);
+    })();
+    const committed = this.publishState(this.loadState(sessionId));
+    return { state: committed, player: this.findPlayer(committed, playerId) };
   }
 
   leave(sessionId, playerId) {
-    const session = this.sessions.get(sessionId);
-    const playerIndex = session?.state.players.findIndex((player) => player.playerId === playerId) ?? -1;
-    if (!session || playerIndex < 0) return undefined;
+    const state = this.loadState(sessionId);
+    const player = this.findPlayer(state, playerId);
+    if (!state || !player) return undefined;
+    let sessionDeleted = false;
+    this.database.transaction(() => {
+      if (state.players.length === 1) {
+        this.sessionRepository.delete(sessionId);
+        sessionDeleted = true;
+        return;
+      }
+      this.playerRepository.delete(playerId);
+      const nextHost = state.hostPlayerId === playerId
+        ? this.playerRepository.firstPlayerId(sessionId)
+        : undefined;
+      this.sessionRepository.touch(sessionId, now(), nextHost);
+    })();
 
-    const [player] = session.state.players.splice(playerIndex, 1);
-    for (const [clientId, mappedPlayerId] of session.clientPlayers) {
-      if (mappedPlayerId === playerId) session.clientPlayers.delete(clientId);
-    }
-    session.credentials.delete(playerId);
-    for (const [actionId, action] of session.actions) {
-      if (action.playerId === playerId) session.actions.delete(actionId);
-    }
-
-    if (session.state.players.length === 0) {
-      this.sessions.delete(sessionId);
+    if (sessionDeleted) {
+      this.stateProjections.delete(sessionId);
       return { player, sessionDeleted: true };
     }
-    if (session.state.hostPlayerId === playerId) session.state.hostPlayerId = session.state.players[0].playerId;
-    this.touchSession(session);
-    return { state: session.state, player, sessionDeleted: false };
+    const committed = this.publishState(this.loadState(sessionId));
+    return { state: committed, player, sessionDeleted: false };
   }
 
   mutate(message, authenticatedPlayerId) {
-    const session = this.sessions.get(message.sessionId);
-    if (!session) return { error: error("SESSION_NOT_FOUND", "Session does not exist") };
-    const player = this.findPlayer(session, authenticatedPlayerId);
+    const state = this.loadState(message.sessionId);
+    if (!state) return { error: error("SESSION_NOT_FOUND", "Session does not exist") };
+    const player = this.findPlayer(state, authenticatedPlayerId);
     if (!player) return { error: error("PLAYER_NOT_FOUND", "The bound player is not in this session") };
     if (!isUUID(message.actionId) || !Number.isSafeInteger(message.expectedRevision) || message.expectedRevision < 0) {
       return { error: error("INVALID_MESSAGE", "actionId must be a UUID and expectedRevision must be a non-negative safe integer") };
     }
-    const fingerprint = JSON.stringify(message);
-    const previous = session.actions.get(message.actionId);
+    const actionFingerprint = fingerprint(message);
+    const previous = this.actionRepository.find(message.sessionId, message.actionId);
     if (previous) {
-      if (previous.playerId === authenticatedPlayerId && previous.fingerprint === fingerprint) return { state: session.state, player, actionId: message.actionId, duplicate: true };
-      return { error: error("DUPLICATE_ACTION", "actionId was already used for another action"), state: session.state };
+      const committed = this.publishState(state);
+      const committedPlayer = this.findPlayer(committed, authenticatedPlayerId);
+      if (previous.playerId === authenticatedPlayerId && previous.fingerprint === actionFingerprint) {
+        return { state: committed, player: committedPlayer, actionId: message.actionId, duplicate: true };
+      }
+      return { error: error("DUPLICATE_ACTION", "actionId was already used for another action"), state: committed };
     }
-    if (message.expectedRevision !== player.revision) return { error: error("STALE_REVISION", "Player revision has changed"), state: session.state };
+    if (message.expectedRevision !== player.revision) {
+      return { error: error("STALE_REVISION", "Player revision has changed"), state: this.publishState(state) };
+    }
     const result = this.apply(player, message);
-    if (result.error) return { ...result, state: session.state };
+    if (result.error) return { ...result, state: this.publishState(state) };
+
+    const timestamp = now();
     player.revision += 1;
-    player.lastSeenAt = now();
-    this.touchSession(session);
-    session.actions.set(message.actionId, { playerId: authenticatedPlayerId, fingerprint });
-    if (session.actions.size > 1000) session.actions.delete(session.actions.keys().next().value);
-    return { state: session.state, player, actionId: message.actionId };
+    player.lastSeenAt = timestamp;
+    this.database.transaction(() => {
+      this.playerRepository.update(player);
+      this.sessionRepository.touch(message.sessionId, timestamp);
+      this.actionRepository.insert(message.sessionId, message.actionId, authenticatedPlayerId, actionFingerprint, timestamp);
+      this.actionRepository.prune(message.sessionId);
+    })();
+    const committed = this.publishState(this.loadState(message.sessionId));
+    return {
+      state: committed,
+      player: this.findPlayer(committed, authenticatedPlayerId),
+      actionId: message.actionId,
+    };
   }
 
   apply(player, message) {
@@ -155,10 +250,14 @@ export class SessionManager {
     } else if (message.type === "updateProduction") {
       if (!RESOURCE_IDS.includes(message.resourceId)) return { error: error("INVALID_RESOURCE", "Resource ID is not valid") };
       const minimum = message.resourceId === "MC" ? -5 : 0;
-      if (!Number.isSafeInteger(message.production) || message.production < minimum || message.production > 20) return { error: error("INVALID_PRODUCTION", "Production is out of range") };
+      if (!Number.isSafeInteger(message.production) || message.production < minimum || message.production > 20) {
+        return { error: error("INVALID_PRODUCTION", "Production is out of range") };
+      }
       player.resources[message.resourceId].production = message.production;
     } else if (message.type === "updateTR") {
-      if (!Number.isSafeInteger(message.tr) || message.tr < 0 || message.tr > 100) return { error: error("INVALID_TR", "TR must be between 0 and 100") };
+      if (!Number.isSafeInteger(message.tr) || message.tr < 0 || message.tr > 100) {
+        return { error: error("INVALID_TR", "TR must be between 0 and 100") };
+      }
       player.tr = message.tr;
     } else if (message.type === "runProduction") {
       const nextAmounts = Object.fromEntries(RESOURCE_IDS.map((id) => [id, player.resources[id].amount]));
@@ -176,7 +275,63 @@ export class SessionManager {
     return {};
   }
 
-  findPlayer(session, playerId) { return session?.state.players.find((player) => player.playerId === playerId); }
-  markConnected(session, player) { player.connected = true; player.lastSeenAt = now(); this.touchSession(session); }
-  touchSession(session) { session.state.revision += 1; session.state.updatedAt = now(); }
+  loadState(sessionId) {
+    const session = this.sessionRepository.find(sessionId);
+    if (!session) return undefined;
+    return { protocolVersion: "v1", ...session, players: this.playerRepository.list(sessionId) };
+  }
+
+  publishState(next) {
+    if (!next) return undefined;
+    const existing = this.stateProjections.get(next.sessionId);
+    if (!existing) {
+      this.stateProjections.set(next.sessionId, next);
+      return next;
+    }
+    const existingPlayers = new Map(existing.players.map((player) => [player.playerId, player]));
+    Object.assign(existing, next);
+    existing.players = next.players.map((nextPlayer) => {
+      const current = existingPlayers.get(nextPlayer.playerId);
+      if (!current) return nextPlayer;
+      const currentResources = current.resources;
+      Object.assign(current, nextPlayer);
+      current.resources = Object.fromEntries(RESOURCE_IDS.map((resourceId) => {
+        const resource = currentResources[resourceId] ?? {};
+        Object.assign(resource, nextPlayer.resources[resourceId]);
+        return [resourceId, resource];
+      }));
+      return current;
+    });
+    return existing;
+  }
+
+  inspectSession(sessionId) {
+    const state = this.publishState(this.loadState(sessionId));
+    if (!state) return undefined;
+    return {
+      state,
+      clientPlayers: this.playerRepository.clientPlayers(sessionId),
+      credentials: this.playerRepository.credentials(sessionId),
+      actions: this.actionRepository.all(sessionId),
+    };
+  }
+
+  findPlayer(state, playerId) {
+    return state?.players.find((player) => player.playerId === playerId);
+  }
+
+  markConnected(sessionId, playerId) {
+    const timestamp = now();
+    this.database.transaction(() => {
+      this.playerRepository.setConnected(playerId, true, timestamp);
+      this.sessionRepository.touch(sessionId, timestamp);
+    })();
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.stateProjections.clear();
+    this.database.close();
+  }
 }

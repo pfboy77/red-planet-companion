@@ -50,6 +50,13 @@ function renderConnectedPrivateSession() {
   return { socket, createRequest };
 }
 
+function editSelectedServerUrl(value: string) {
+  fireEvent.click(screen.getByRole('button', { name: 'Manage servers' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Local Server' }));
+  fireEvent.change(screen.getByLabelText('WebSocket URL'), { target: { value } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save server' }));
+}
+
 test('renders the canonical zero-resource initial state', () => {
   render(<App />);
   expect(screen.getByText('MC: 0')).toBeInTheDocument();
@@ -131,10 +138,11 @@ test('session creation authenticates the host and stores only its resume token l
     })) }));
 
     expect(connection.send).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(localStorage.getItem('multiplayerResumeCredentials')!)).toEqual({
+    expect(JSON.parse(localStorage.getItem('multiplayerResumeCredentials')!)).toEqual(expect.objectContaining({
       serverUrl: 'ws://localhost:8080/ws', sessionId: 'session-id', clientId: request.clientId, playerId: 'player-id', roomMode: 'private',
       resumeToken: '0123456789abcdef0123456789abcdef',
-    });
+      serverProfileId: expect.any(String),
+    }));
   } finally {
     global.WebSocket = originalWebSocket;
   }
@@ -273,16 +281,14 @@ test('friends mode needs no token and mutations use the bound player revision', 
   }
 });
 
-test.each(['', 'abc', 'http://example.com', 'ws://[invalid'])('invalid Server URL %p never constructs a WebSocket', value => {
+test.each(['', 'abc', 'http://example.com', 'ws://[invalid'])('invalid Server URL %p cannot be saved and never constructs a WebSocket', value => {
   const originalWebSocket = global.WebSocket;
   const constructor = jest.fn();
   global.WebSocket = constructor as unknown as typeof WebSocket;
 
   try {
     render(<App />);
-    fireEvent.change(screen.getByLabelText('Player name'), { target: { value: 'Ada' } });
-    fireEvent.change(screen.getByLabelText('Server URL'), { target: { value } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create game' }));
+    editSelectedServerUrl(value);
 
     expect(constructor).not.toHaveBeenCalled();
     expect(screen.getByLabelText('Connection status')).toHaveTextContent('Disconnected');
@@ -304,7 +310,7 @@ test.each(['ws://localhost:8080/ws', 'wss://example.com/ws'])('valid Server URL 
   try {
     render(<App />);
     fireEvent.change(screen.getByLabelText('Player name'), { target: { value: 'Ada' } });
-    fireEvent.change(screen.getByLabelText('Server URL'), { target: { value } });
+    editSelectedServerUrl(value);
     fireEvent.click(screen.getByRole('button', { name: 'Create game' }));
 
     expect(constructor).toHaveBeenCalledWith(value);
@@ -312,6 +318,34 @@ test.each(['ws://localhost:8080/ws', 'wss://example.com/ws'])('valid Server URL 
   } finally {
     global.WebSocket = originalWebSocket;
   }
+});
+
+test('server profiles can be added, selected, edited, deleted, and restored from localStorage', () => {
+  const confirm = jest.spyOn(window, 'confirm').mockReturnValue(true);
+  const first = render(<App />);
+  fireEvent.click(screen.getByRole('button', { name: 'Manage servers' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
+  fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Home Server' } });
+  fireEvent.change(screen.getByLabelText('WebSocket URL'), { target: { value: 'wss://mars.example.com/ws' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save server' }));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Select Home Server' }));
+  expect(screen.getByLabelText('Server')).toHaveDisplayValue('Home Server');
+  fireEvent.click(screen.getByRole('button', { name: 'Edit Home Server' }));
+  fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Family Server' } });
+  fireEvent.change(screen.getByLabelText('WebSocket URL'), { target: { value: 'ws://192.168.1.20:8080/ws' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save server' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Delete Local Server' }));
+
+  expect(confirm).toHaveBeenCalledWith('Delete Local Server?');
+  expect(screen.queryByText('Local Server')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Server')).toHaveDisplayValue('Family Server');
+  first.unmount();
+
+  render(<App />);
+  expect(screen.getByLabelText('Server')).toHaveDisplayValue('Family Server');
+  expect(screen.getByText('ws://192.168.1.20:8080/ws')).toBeInTheDocument();
+  confirm.mockRestore();
 });
 
 test('a synchronous WebSocket constructor failure returns to disconnected', () => {

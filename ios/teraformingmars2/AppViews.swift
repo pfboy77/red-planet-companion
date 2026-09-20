@@ -5,6 +5,7 @@ struct HomeView: View {
     var viewModel: GameViewModel
     var enterGame: () -> Void
     @State private var copiedMessage: String?
+    @State private var showingServerManager = false
 
     var body: some View {
         ScrollView {
@@ -38,21 +39,41 @@ struct HomeView: View {
         .overlay(alignment: .bottom) {
             if let copiedMessage { Text(copiedMessage).padding(10).background(.regularMaterial).clipShape(Capsule()).padding() }
         }
+        .sheet(isPresented: $showingServerManager) {
+            ServerManagerView(viewModel: viewModel)
+        }
     }
 
     private var connectionForm: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("ローカルマルチプレイ").font(.title2.bold())
-            Text("同じWi-Fi上で起動したRed PlanetローカルサーバーのLANアドレスを入力します。iPhoneでは localhost は利用できません。")
+            Text("マルチプレイ").font(.title2.bold())
+            Text("登録済みのRed Planetサーバーを選択します。LANでは ws://、インターネット公開時は wss:// を利用できます。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            TextField("ws://192.168.x.x:8080/ws", text: Bindable(viewModel).serverURL)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .textContentType(.URL)
-                .keyboardType(.URL)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier("serverURLField")
+            if viewModel.serverProfiles.isEmpty {
+                ContentUnavailableView("サーバーが未登録です", systemImage: "server.rack", description: Text("サーバーを追加してからマルチプレイを開始してください"))
+            } else {
+                Picker("接続先サーバー", selection: Binding(
+                    get: { viewModel.selectedServerID },
+                    set: { if let id = $0 { viewModel.selectServerProfile(id: id) } }
+                )) {
+                    ForEach(viewModel.serverProfiles) { profile in
+                        Text(profile.name).tag(Optional(profile.id))
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(viewModel.isMultiplayerConnected || viewModel.isConnecting || viewModel.isLeavingMultiplayer)
+                .accessibilityIdentifier("serverProfilePicker")
+                if let selected = viewModel.selectedServerProfile {
+                    Text(selected.webSocketURL)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+            Button("サーバーを管理") { showingServerManager = true }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("manageServersButton")
             TextField("プレイヤー名（20文字以内）", text: Bindable(viewModel).displayName)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("displayNameField")
@@ -101,6 +122,146 @@ struct HomeView: View {
                 HStack { ProgressView(); Text("サーバーへ接続中…") }
                     .font(.footnote)
                     .accessibilityIdentifier("connectionProgress")
+            }
+        }
+    }
+}
+
+struct ServerManagerView: View {
+    var viewModel: GameViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var editingProfileID: UUID?
+    @State private var serverName = ""
+    @State private var webSocketURL = ""
+    @State private var showingEditor = false
+    @State private var pendingDeletion: ServerProfile?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("登録済みサーバー") {
+                    if viewModel.serverProfiles.isEmpty {
+                        Text("登録済みサーバーはありません")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(viewModel.serverProfiles) { profile in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(profile.name).font(.headline)
+                                    Text(profile.webSocketURL).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if profile.id == viewModel.selectedServerID {
+                                    Label("選択中", systemImage: "checkmark.circle.fill")
+                                        .labelStyle(.titleAndIcon)
+                                        .foregroundStyle(.green)
+                                }
+                            }
+                            HStack(spacing: 8) {
+                                if profile.id != viewModel.selectedServerID {
+                                    Button("選択") { viewModel.selectServerProfile(id: profile.id) }
+                                        .buttonStyle(.bordered)
+                                }
+                                Button("編集") { beginEditing(profile) }
+                                    .buttonStyle(.bordered)
+                                Button("削除", role: .destructive) { pendingDeletion = profile }
+                                    .buttonStyle(.bordered)
+                            }
+                            .disabled(viewModel.isMultiplayerConnected || viewModel.isConnecting || viewModel.isLeavingMultiplayer)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+                Section {
+                    Button("サーバーを追加", systemImage: "plus") { beginAdding() }
+                        .disabled(viewModel.isMultiplayerConnected || viewModel.isConnecting || viewModel.isLeavingMultiplayer)
+                        .accessibilityIdentifier("addServerButton")
+                }
+            }
+            .navigationTitle("サーバー管理")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("完了") { dismiss() } }
+            }
+        }
+        .sheet(isPresented: $showingEditor) {
+            ServerProfileEditorView(
+                title: editingProfileID == nil ? "サーバーを追加" : "サーバーを編集",
+                serverName: $serverName,
+                webSocketURL: $webSocketURL,
+                onSave: {
+                    let validationError = viewModel.saveServerProfile(id: editingProfileID, name: serverName, webSocketURL: webSocketURL)
+                    if validationError == nil { showingEditor = false }
+                    return validationError
+                }
+            )
+        }
+        .alert("サーバーを削除", isPresented: Binding(
+            get: { pendingDeletion != nil },
+            set: { if !$0 { pendingDeletion = nil } }
+        ), presenting: pendingDeletion) { profile in
+            Button("削除", role: .destructive) {
+                viewModel.deleteServerProfile(id: profile.id)
+                pendingDeletion = nil
+            }
+            Button("キャンセル", role: .cancel) { pendingDeletion = nil }
+        } message: { profile in
+            Text("「\(profile.name)」を削除しますか？")
+        }
+    }
+
+    private func beginAdding() {
+        editingProfileID = nil
+        serverName = ""
+        webSocketURL = ""
+        showingEditor = true
+    }
+
+    private func beginEditing(_ profile: ServerProfile) {
+        editingProfileID = profile.id
+        serverName = profile.name
+        webSocketURL = profile.webSocketURL
+        showingEditor = true
+    }
+}
+
+struct ServerProfileEditorView: View {
+    let title: String
+    @Binding var serverName: String
+    @Binding var webSocketURL: String
+    let onSave: () -> String?
+    @Environment(\.dismiss) private var dismiss
+    @State private var validationError: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("サーバー情報") {
+                    TextField("サーバー名", text: $serverName)
+                        .textContentType(.name)
+                        .accessibilityIdentifier("serverNameField")
+                    TextField("wss://mars.example.com/ws", text: $webSocketURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textContentType(.URL)
+                        .keyboardType(.URL)
+                        .accessibilityLabel("WebSocket URL")
+                        .accessibilityIdentifier("serverURLField")
+                    Text("ws:// と wss:// の両方を登録できます。接続確認に失敗しても保存自体は妨げません。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                if let validationError {
+                    Section { Text(validationError).foregroundStyle(.red) }
+                }
+            }
+            .navigationTitle(title)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("キャンセル") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { validationError = onSave() }
+                        .accessibilityIdentifier("saveServerButton")
+                }
             }
         }
     }

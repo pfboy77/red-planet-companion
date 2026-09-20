@@ -40,8 +40,9 @@ red-planet-companion/
 - Resource production phase
 - Undo / redo support
 - Browser localStorage and iOS local-state persistence (Private resume token is stored in Keychain)
+- Multiple saved multiplayer server profiles on Web and iOS
 - Responsive web UI
-- Local network multiplayer resource sharing
+- LAN or WSS multiplayer resource sharing with SQLite server persistence
 
 ## Tech Stack
 
@@ -72,7 +73,7 @@ Open http://localhost:3000 in your browser.
 
 ### ローカルマルチプレイ
 
-同じ Wi-Fi / ローカルネットワーク上のプレイヤーと、資源・産出量・TRをリアルタイムで共有できます。ゲーム状態はホストPC上のローカルサーバーだけに保存され、外部クラウドサービスは使用しません。
+同じ Wi-Fi / ローカルネットワーク上のプレイヤーと、資源・産出量・TRをリアルタイムで共有できます。ゲーム状態の正本はホストPC上のSQLite DBで、外部クラウドサービスは使用しません。プロセスやPCを再起動しても、明示的に退出していないセッションは再接続できます。
 
 1. ホストPCで、サーバー用ターミナルを開いて起動します。起動後も、このターミナルは閉じずに開いたままにします。
 
@@ -82,7 +83,13 @@ Open http://localhost:3000 in your browser.
    npm start
    ```
 
-   `Red Planet local server listening on ws://0.0.0.0:8080/ws` と表示されれば準備完了です。
+   `Red Planet server listening on ws://0.0.0.0:8080/ws` と表示されれば準備完了です。
+
+   DBの既定保存先は `server/data/red-planet.sqlite3` です。保存先や表示名は環境変数で変更できます。
+
+   ```bash
+   DB_PATH=/var/lib/red-planet/red-planet.sqlite3 SERVER_NAME="Home Red Planet Server" npm start
+   ```
 
 2. 別のターミナルでWebアプリを起動します。
 
@@ -90,11 +97,11 @@ Open http://localhost:3000 in your browser.
    npm start
    ```
 
-   ブラウザで `http://localhost:3000` を開き、「Local multiplayer」欄にプレイヤー名を入力します。通常は **Friends**（信頼できる同じ場所・LAN向け）を選び、**Create game** を押します。共有 Wi-Fi など再接続時の本人確認を強めたい場合は **Private** を選びます。どちらもパスワード入力は不要です。ホストPCでの Server URL は `ws://localhost:8080/ws` のままで構いません。
+   ブラウザで `http://localhost:3000` を開き、**Manage servers** から接続先を登録・選択してプレイヤー名を入力します。初回は `Local Server`（`ws://localhost:8080/ws`）が登録されています。通常は **Friends**（信頼できる同じ場所・LAN向け）を選び、**Create game** を押します。共有 Wi-Fi など再接続時の本人確認を強めたい場合は **Private** を選びます。どちらもパスワード入力は不要です。
 
 3. 表示された **Session ID** と **Join code** を、ほかのプレイヤーに共有します。
 
-4. 参加者は、別の端末またはプライベートブラウズウインドウでWebアプリを開き、名前・Session ID・Join codeを入力して **Join game** を選びます。別端末から参加する場合は、Server URL をホストPCのLAN IPアドレスに変更します。
+4. 参加者は、別の端末またはプライベートブラウズウインドウでWebアプリを開き、**Manage servers** からホストPCのLAN IPアドレスを登録します。そのサーバーを選択し、名前・Session ID・Join codeを入力して **Join game** を選びます。
 
    ```text
    ws://192.168.1.20:8080/ws
@@ -114,7 +121,19 @@ Friends はブラウザ/iOSが保持する端末 ID で簡易再接続します�
 open ios/teraformingmars2/teraformingmars2.xcodeproj
 ```
 
-XcodeでiOSアプリを起動した後、ホーム画面のローカルマルチプレイ欄にサーバーURLとプレイヤー名を入力します。作成時は Friends / Private を選択できます。ホストPC上で実行する場合は `ws://<ホストPCのLAN IP>:8080/ws` を指定します。iPhone上の `localhost` はホストPCではなくiPhone自身を指すため使用できません。Web版と同じ Session ID / Join code で参加でき、自分の資源操作はサーバーへ送信されます。Private の resume token は Keychain へ自動保存され、ユーザー入力は不要です。退出後はマルチプレイ参加前のローカルゲーム状態へ戻ります。
+XcodeでiOSアプリを起動した後、ホーム画面の **サーバーを管理** から接続先を追加・編集・削除・選択します。作成時は Friends / Private を選択できます。ホストPC上で実行する場合は `ws://<ホストPCのLAN IP>:8080/ws` を登録します。iPhone上の `localhost` はホストPCではなくiPhone自身を指すため使用できません。Web版と同じ Session ID / Join code で参加でき、自分の資源操作はサーバーへ送信されます。Private の resume token はKeychainへ自動保存され、選択中のサーバーと一致する場合だけ使用されます。退出後はマルチプレイ参加前のローカルゲーム状態へ戻ります。
+
+### Server persistence
+
+サーバーは以下のマルチプレイ情報をSQLiteへ保存します。
+
+- sessions / players / TR
+- resources / production
+- Friends reconnect identities
+- Private resume tokenのSHA-256 hash
+- 処理済みaction ID（セッションごとに最新1000件）
+
+raw Private resume tokenとWebSocket接続自体は保存しません。ソロプレイの保存方式は従来どおり各端末ローカルです。`GET /health` は `status`、永続 `serverId`、`serverName`、`protocolVersion` を返し、DB pathやcredentialは返しません。
 
 iOS版の提出準備と実機確認手順は [iOSリリース・チェックリスト](docs/IOS_RELEASE_CHECKLIST.md) を参照してください。
 

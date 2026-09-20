@@ -1,7 +1,7 @@
 import ResourceCard from "./components/ResourceCard";
 import { Resource, GameState } from "./types";
 import React, { useState, useEffect, useRef } from "react";
-import { clearResumeCredentials, CONNECTION_REPLACED_CLOSE_CODE, ConnectionState, id, readResumeCredentials, resourceIds, ResumeCredentials, RoomMode, SessionState, validateWebSocketUrl, writeResumeCredentials } from "./multiplayer";
+import { clearResumeCredentials, CONNECTION_REPLACED_CLOSE_CODE, ConnectionState, id, normalizeWebSocketUrl, readResumeCredentialsForServer, readServerRegistry, resourceIds, ResumeCredentials, RoomMode, ServerProfile, SessionState, validateWebSocketUrl, writeResumeCredentials, writeServerRegistry } from "./multiplayer";
 import { createInitialResources } from "./game/model";
 import { changeResource, resetGame, runProduction } from "./game/reducer";
 
@@ -38,20 +38,27 @@ function App() {
   const [undoStack, setUndoStack] = useState<GameState[]>([]);
   const [redoStack, setRedoStack] = useState<GameState[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [serverUrl, setServerUrl] = useState("ws://localhost:8080/ws");
+  const [serverRegistry, setServerRegistry] = useState(() => readServerRegistry());
+  const selectedServerProfile = serverRegistry.profiles.find(profile => profile.id === serverRegistry.selectedServerId) ?? null;
+  const [serverUrl, setServerUrl] = useState(() => selectedServerProfile?.webSocketURL ?? "");
+  const [managingServers, setManagingServers] = useState(false);
+  const [editingServerId, setEditingServerId] = useState<string | null>(null);
+  const [serverNameDraft, setServerNameDraft] = useState("");
+  const [serverUrlDraft, setServerUrlDraft] = useState("");
+  const [serverFormError, setServerFormError] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState("");
   const [joinSessionId, setJoinSessionId] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [roomMode, setRoomMode] = useState<RoomMode>("friends");
   const [session, setSession] = useState<SessionState | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
-  const [activePlayerId, setActivePlayerId] = useState<string | null>(() => readResumeCredentials()?.playerId ?? null);
+  const [activePlayerId, setActivePlayerId] = useState<string | null>(() => selectedServerProfile ? readResumeCredentialsForServer(selectedServerProfile)?.playerId ?? null : null);
   const [actionPending, setActionPending] = useState(false);
   const [isLeaving, setIsLeaving] = useState(false);
   const [connectionReplaced, setConnectionReplaced] = useState(false);
   const [clientId] = useState(() => localStorage.getItem("multiplayerClientId") || id());
   const socketRef = useRef<WebSocket | null>(null);
-  const resumeCredentialsRef = useRef<ResumeCredentials | null>(readResumeCredentials());
+  const resumeCredentialsRef = useRef<ResumeCredentials | null>(selectedServerProfile ? readResumeCredentialsForServer(selectedServerProfile) : null);
   const intentionallyClosedRef = useRef(new WeakSet<WebSocket>());
   const reconnectTimerRef = useRef<number | null>(null);
   const leaveTimerRef = useRef<number | null>(null);
@@ -76,7 +83,17 @@ function App() {
     return true;
   };
   const rememberResumeCredentials = (serverUrl: string, sessionId: string, playerId: string, nextRoomMode: RoomMode, resumeToken?: string) => {
-    const credentials = { serverUrl, sessionId, clientId, playerId, roomMode: nextRoomMode, ...(resumeToken ? { resumeToken } : {}) };
+    const matchingProfile = serverRegistry.profiles.find(profile => normalizeWebSocketUrl(profile.webSocketURL) === normalizeWebSocketUrl(serverUrl));
+    const serverProfileId = resumeCredentialsRef.current?.serverProfileId ?? matchingProfile?.id ?? selectedServerProfile?.id;
+    const credentials = {
+      serverUrl,
+      ...(serverProfileId ? { serverProfileId } : {}),
+      sessionId,
+      clientId,
+      playerId,
+      roomMode: nextRoomMode,
+      ...(resumeToken ? { resumeToken } : {}),
+    };
     resumeCredentialsRef.current = credentials;
     writeResumeCredentials(credentials);
     setActivePlayerId(playerId);
@@ -109,8 +126,9 @@ function App() {
     pendingLeaveRef.current = false;
     leaveRequestSentRef.current = false;
     closeCurrentSocket();
+    const serverProfileId = resumeCredentialsRef.current?.serverProfileId;
     resumeCredentialsRef.current = null;
-    clearResumeCredentials();
+    clearResumeCredentials(serverProfileId);
     pendingActionIdRef.current = null;
     setActionPending(false);
     setIsLeaving(false);
@@ -236,8 +254,9 @@ function App() {
         setError(errorMessage);
         setConnectionState("disconnected");
         if (["AUTHENTICATION_FAILED", "PLAYER_NOT_FOUND", "SESSION_NOT_FOUND"].includes(code)) {
+          const serverProfileId = resumeCredentialsRef.current?.serverProfileId;
           resumeCredentialsRef.current = null;
-          clearResumeCredentials();
+          clearResumeCredentials(serverProfileId);
           setSession(null);
           setActivePlayerId(null);
         }
@@ -280,7 +299,7 @@ function App() {
     if (!credentials) return;
     if (credentials.clientId !== clientId) {
       resumeCredentialsRef.current = null;
-      clearResumeCredentials();
+      clearResumeCredentials(credentials.serverProfileId);
       return;
     }
     setServerUrl(credentials.serverUrl);
@@ -290,7 +309,7 @@ function App() {
   const connect = (afterOpen: (connection: WebSocket) => void) => {
     if (!displayName.trim()) { setError("Enter your player name first."); return; }
     resumeCredentialsRef.current = null;
-    clearResumeCredentials();
+    clearResumeCredentials(selectedServerProfile?.id);
     setActivePlayerId(null);
     setSession(null);
     setConnectionReplaced(false);
@@ -338,6 +357,88 @@ function App() {
   };
   const multiplayerActive = activePlayerId !== null || connectionState !== "disconnected";
   const multiplayerControlsDisabled = multiplayerActive && (connectionState !== "connected" || actionPending || isLeaving);
+
+  const persistServerRegistry = (profiles: ServerProfile[], selectedServerId: string | null) => {
+    const next = { profiles, selectedServerId };
+    writeServerRegistry(next);
+    setServerRegistry(next);
+  };
+  const beginAddingServer = () => {
+    setEditingServerId("new");
+    setServerNameDraft("");
+    setServerUrlDraft("");
+    setServerFormError(null);
+  };
+  const beginEditingServer = (profile: ServerProfile) => {
+    setEditingServerId(profile.id);
+    setServerNameDraft(profile.name);
+    setServerUrlDraft(profile.webSocketURL);
+    setServerFormError(null);
+  };
+  const cancelEditingServer = () => {
+    setEditingServerId(null);
+    setServerFormError(null);
+  };
+  const saveServerProfile = () => {
+    const name = serverNameDraft.trim();
+    const normalizedUrl = normalizeWebSocketUrl(serverUrlDraft);
+    if (!name || name.length > 50) {
+      setServerFormError("Server name must contain 1 to 50 characters.");
+      return;
+    }
+    if (!normalizedUrl) {
+      setServerFormError("Enter a valid WebSocket URL beginning with ws:// or wss://.");
+      return;
+    }
+    const timestamp = new Date().toISOString();
+    if (editingServerId === "new") {
+      const created: ServerProfile = { id: id(), name, webSocketURL: normalizedUrl, createdAt: timestamp, updatedAt: timestamp };
+      const selectedId = serverRegistry.selectedServerId ?? created.id;
+      persistServerRegistry([...serverRegistry.profiles, created], selectedId);
+      if (selectedId === created.id) setServerUrl(created.webSocketURL);
+    } else {
+      const previous = serverRegistry.profiles.find(profile => profile.id === editingServerId);
+      if (!previous) return;
+      if (normalizeWebSocketUrl(previous.webSocketURL) !== normalizedUrl) clearResumeCredentials(previous.id);
+      const updated = { ...previous, name, webSocketURL: normalizedUrl, updatedAt: timestamp };
+      persistServerRegistry(serverRegistry.profiles.map(profile => profile.id === updated.id ? updated : profile), serverRegistry.selectedServerId);
+      if (serverRegistry.selectedServerId === updated.id) setServerUrl(updated.webSocketURL);
+    }
+    setEditingServerId(null);
+    setServerFormError(null);
+  };
+  const selectServerProfile = (profileId: string) => {
+    if (multiplayerActive) return;
+    const profile = serverRegistry.profiles.find(candidate => candidate.id === profileId);
+    if (!profile) return;
+    persistServerRegistry(serverRegistry.profiles, profile.id);
+    setServerUrl(profile.webSocketURL);
+    setError(null);
+    const credentials = readResumeCredentialsForServer(profile);
+    resumeCredentialsRef.current = credentials;
+    setActivePlayerId(credentials?.playerId ?? null);
+    if (!credentials) return;
+    setJoinSessionId(credentials.sessionId);
+    setRoomMode(credentials.roomMode);
+    if (credentials.clientId !== clientId) {
+      resumeCredentialsRef.current = null;
+      setActivePlayerId(null);
+      clearResumeCredentials(profile.id);
+      return;
+    }
+    openConnection(profile.webSocketURL, undefined, credentials);
+  };
+  const deleteServerProfile = (profile: ServerProfile) => {
+    if (!window.confirm(`Delete ${profile.name}?`)) return;
+    clearResumeCredentials(profile.id);
+    const profiles = serverRegistry.profiles.filter(candidate => candidate.id !== profile.id);
+    const selectedId = serverRegistry.selectedServerId === profile.id
+      ? profiles[0]?.id ?? null
+      : serverRegistry.selectedServerId;
+    persistServerRegistry(profiles, selectedId);
+    if (selectedId !== serverRegistry.selectedServerId) setServerUrl(profiles.find(candidate => candidate.id === selectedId)?.webSocketURL ?? "");
+    if (editingServerId === profile.id) cancelEditingServer();
+  };
 
   useEffect(() => {
     const data = JSON.stringify({ resources, tr });
@@ -449,9 +550,55 @@ function App() {
   return (
     <div style={{ padding: 16, maxWidth: 600, margin: "0 auto" }}>
       <section style={{ border: "1px solid #ccc", borderRadius: 8, padding: 12, marginBottom: 16 }}>
-        <strong>Local multiplayer</strong>
+        <strong>Multiplayer</strong>
         <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
-          <input aria-label="Server URL" value={serverUrl} onChange={e => setServerUrl(e.target.value)} placeholder="ws://192.168.x.x:8080/ws" />
+          <label htmlFor="server-profile">Server</label>
+          <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+            <select
+              id="server-profile"
+              aria-label="Server"
+              value={serverRegistry.selectedServerId ?? ""}
+              onChange={event => selectServerProfile(event.target.value)}
+              disabled={multiplayerActive || serverRegistry.profiles.length === 0}
+              style={{ flex: 1, minHeight: 44 }}
+            >
+              {serverRegistry.profiles.length === 0 && <option value="">Add a server first</option>}
+              {serverRegistry.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+            </select>
+            <button type="button" onClick={() => setManagingServers(value => !value)} style={{ minHeight: 44 }}>
+              {managingServers ? "Close server manager" : "Manage servers"}
+            </button>
+          </div>
+          {selectedServerProfile && <small>{selectedServerProfile.webSocketURL}</small>}
+          {managingServers && <div aria-label="Registered servers" style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, display: "grid", gap: 12 }}>
+            <strong>Registered servers</strong>
+            {serverRegistry.profiles.length === 0
+              ? <p>No servers registered. Add one to use multiplayer.</p>
+              : <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 10 }}>
+                {serverRegistry.profiles.map(profile => <li key={profile.id} style={{ borderBottom: "1px solid #ddd", paddingBottom: 10 }}>
+                  <div><strong>{profile.name}</strong>{profile.id === serverRegistry.selectedServerId ? " · Selected" : ""}</div>
+                  <div style={{ overflowWrap: "anywhere" }}>{profile.webSocketURL}</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
+                    {profile.id !== serverRegistry.selectedServerId && <button type="button" onClick={() => selectServerProfile(profile.id)} disabled={multiplayerActive} style={{ minHeight: 44 }}>Select {profile.name}</button>}
+                    <button type="button" onClick={() => beginEditingServer(profile)} disabled={multiplayerActive} style={{ minHeight: 44 }}>Edit {profile.name}</button>
+                    <button type="button" onClick={() => deleteServerProfile(profile)} disabled={multiplayerActive} style={{ minHeight: 44, color: "#b42318" }}>Delete {profile.name}</button>
+                  </div>
+                </li>)}
+              </ul>}
+            <button type="button" onClick={beginAddingServer} disabled={multiplayerActive} style={{ minHeight: 44 }}>Add server</button>
+            {editingServerId && <fieldset style={{ display: "grid", gap: 8 }}>
+              <legend>{editingServerId === "new" ? "Add server" : "Edit server"}</legend>
+              <label htmlFor="server-name">Server name</label>
+              <input id="server-name" aria-label="Server name" value={serverNameDraft} onChange={event => setServerNameDraft(event.target.value)} maxLength={50} />
+              <label htmlFor="server-websocket-url">WebSocket URL</label>
+              <input id="server-websocket-url" aria-label="WebSocket URL" value={serverUrlDraft} onChange={event => setServerUrlDraft(event.target.value)} placeholder="wss://mars.example.com/ws" />
+              {serverFormError && <div role="alert" style={{ color: "#b42318" }}>{serverFormError}</div>}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" onClick={saveServerProfile} style={{ minHeight: 44 }}>Save server</button>
+                <button type="button" onClick={cancelEditingServer} style={{ minHeight: 44 }}>Cancel</button>
+              </div>
+            </fieldset>}
+          </div>}
           <input aria-label="Player name" value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Your name" maxLength={20} />
           <div aria-label="Connection status">{connectionLabel[connectionState]}</div>
           {!multiplayerActive && <>

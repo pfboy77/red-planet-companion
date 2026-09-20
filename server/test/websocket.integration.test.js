@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { once } from "node:events";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import { WebSocket } from "ws";
@@ -18,8 +20,8 @@ const validateServerMessage = ajv.compile(serverSchema);
 
 const request = (type, values = {}) => ({ type, protocolVersion: "v1", requestId: randomUUID(), ...values });
 
-async function startServer() {
-  const app = createLocalServer();
+async function startServer({ databasePath = ":memory:", serverName } = {}) {
+  const app = createLocalServer({ databasePath, serverName });
   app.server.listen(0, "127.0.0.1");
   await once(app.server, "listening");
   const address = app.server.address();
@@ -27,8 +29,7 @@ async function startServer() {
 }
 
 async function stopServer(app) {
-  for (const client of app.webSocketServer.clients) client.terminate();
-  await new Promise((resolve) => app.server.close(resolve));
+  await app.close();
 }
 
 async function connect(url, observed) {
@@ -382,3 +383,91 @@ test("last player receives sessionLeft before its session is deleted", async (co
   assert.equal(left.sessionDeleted, true);
   assert.equal(app.manager.sessions.has(created.sessionId), false);
 });
+
+test("health exposes stable public server metadata without internal configuration", async (context) => {
+  const app = await startServer({ serverName: "Home Red Planet Server" });
+  context.after(() => stopServer(app));
+  const response = await fetch(app.url.replace("ws://", "http://").replace("/ws", "/health"));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+  assert.deepEqual(body, {
+    status: "ok",
+    serverId: app.manager.serverMetadata.serverId,
+    serverName: "Home Red Planet Server",
+    protocolVersion: "v1",
+  });
+  assert.equal("databasePath" in body, false);
+  assert.equal("resumeToken" in body, false);
+});
+
+for (const roomMode of ["friends", "private"]) {
+  test(`${roomMode} WebSocket resume restores state and idempotency after server restart`, async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "red-planet-ws-")), "restart.sqlite3");
+    const clientId = randomUUID();
+    const observedA = new Set();
+    const serverA = await startServer({ databasePath });
+    const original = await connect(serverA.url, observedA);
+    original.socket.send(JSON.stringify(request("createSession", { clientId, displayName: "Ada", roomMode })));
+    const created = await original.next((message) => message.type === "sessionCreated");
+    const actionId = randomUUID();
+    original.socket.send(JSON.stringify(request("updateResource", {
+      sessionId: created.sessionId,
+      actionId,
+      expectedRevision: 0,
+      resourceId: "Steel",
+      amount: 7,
+      operation: "add",
+    })));
+    await original.next((message) => message.type === "actionAccepted" && message.actionId === actionId);
+    original.socket.send(JSON.stringify(request("updateProduction", {
+      sessionId: created.sessionId,
+      actionId: randomUUID(),
+      expectedRevision: 1,
+      resourceId: "Steel",
+      production: 3,
+    })));
+    await original.next((message) => message.type === "actionAccepted" && message.playerRevision === 2);
+    original.socket.send(JSON.stringify(request("updateTR", {
+      sessionId: created.sessionId,
+      actionId: randomUUID(),
+      expectedRevision: 2,
+      tr: 42,
+    })));
+    const beforeRestart = await original.next((message) => message.type === "actionAccepted" && message.playerRevision === 3);
+    await stopServer(serverA);
+
+    const observedB = new Set();
+    const serverB = await startServer({ databasePath });
+    try {
+      const resumed = await connect(serverB.url, observedB);
+      const resumeValues = roomMode === "friends"
+        ? { sessionId: created.sessionId, clientId }
+        : { sessionId: created.sessionId, playerId: created.playerId, resumeToken: created.resumeToken };
+      resumed.socket.send(JSON.stringify(request("resumeSession", resumeValues)));
+      const snapshot = await resumed.next((message) => message.type === "stateSnapshot");
+      const player = snapshot.sessionState.players.find(({ playerId }) => playerId === created.playerId);
+      assert.equal(snapshot.sessionState.sessionId, created.sessionId);
+      assert.equal(snapshot.sessionState.joinCode, created.joinCode);
+      assert.equal(snapshot.sessionState.hostPlayerId, created.hostPlayerId);
+      assert.equal(player.tr, 42);
+      assert.deepEqual(player.resources.Steel, { amount: 7, production: 3 });
+      assert.equal(player.revision, 3);
+      assert.ok(snapshot.sessionState.revision > beforeRestart.sessionState.revision);
+
+      resumed.socket.send(JSON.stringify(request("updateResource", {
+        sessionId: created.sessionId,
+        actionId,
+        expectedRevision: 0,
+        resourceId: "Steel",
+        amount: 7,
+        operation: "add",
+      })));
+      const duplicate = await resumed.next((message) => message.type === "actionAccepted" && message.actionId === actionId);
+      assert.equal(duplicate.sessionState.players.find(({ playerId }) => playerId === created.playerId).resources.Steel.amount, 7);
+    } finally {
+      await stopServer(serverB);
+    }
+  });
+}
