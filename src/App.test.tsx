@@ -1,7 +1,12 @@
 import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import App from './App';
-import { CONNECTION_REPLACED_CLOSE_CODE } from './multiplayer';
+import {
+  CONNECTION_REPLACED_CLOSE_CODE,
+  selectedServerIdKey,
+  serverProfilesKey,
+  writeResumeCredentials,
+} from './multiplayer';
 
 beforeEach(() => {
   localStorage.clear();
@@ -346,6 +351,99 @@ test('server profiles can be added, selected, edited, deleted, and restored from
   expect(screen.getByLabelText('Server')).toHaveDisplayValue('Family Server');
   expect(screen.getByText('ws://192.168.1.20:8080/ws')).toBeInTheDocument();
   confirm.mockRestore();
+});
+
+test('an unreachable resume server can be switched without waiting for reconnect', () => {
+  const originalWebSocket = global.WebSocket;
+  jest.useFakeTimers();
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+  const timestamp = new Date().toISOString();
+  const clientId = '11111111-1111-4111-8111-111111111111';
+  const profiles = [
+    { id: 'server-a', name: 'Offline Server', webSocketURL: 'ws://offline.example/ws', createdAt: timestamp, updatedAt: timestamp },
+    { id: 'server-b', name: 'Backup Server', webSocketURL: 'ws://backup.example/ws', createdAt: timestamp, updatedAt: timestamp },
+  ];
+  localStorage.setItem(serverProfilesKey, JSON.stringify(profiles));
+  localStorage.setItem(selectedServerIdKey, profiles[0].id);
+  localStorage.setItem('multiplayerClientId', clientId);
+  writeResumeCredentials({
+    serverProfileId: profiles[0].id,
+    serverUrl: profiles[0].webSocketURL,
+    sessionId: 'offline-session',
+    clientId,
+    playerId: 'offline-player',
+    roomMode: 'private',
+    resumeToken: '0123456789abcdef0123456789abcdef',
+  });
+
+  try {
+    render(<App />);
+    expect(LifecycleWebSocket.instances).toHaveLength(1);
+    const picker = screen.getByLabelText('Server');
+    expect(picker).toBeEnabled();
+    fireEvent.change(picker, { target: { value: profiles[1].id } });
+    expect(LifecycleWebSocket.instances[0].close).toHaveBeenCalledTimes(1);
+    act(() => LifecycleWebSocket.instances[0].onopen?.());
+    expect(LifecycleWebSocket.instances[0].send).not.toHaveBeenCalled();
+    expect(picker).toHaveDisplayValue('Backup Server');
+
+    fireEvent.change(picker, { target: { value: profiles[0].id } });
+    expect(LifecycleWebSocket.instances).toHaveLength(2);
+    act(() => LifecycleWebSocket.instances[1].onclose?.({ code: 1006 }));
+    fireEvent.change(picker, { target: { value: profiles[1].id } });
+    act(() => jest.advanceTimersByTime(1000));
+
+    expect(picker).toHaveDisplayValue('Backup Server');
+    expect(screen.getByLabelText('Connection status')).toHaveTextContent('Disconnected');
+    expect(screen.getByRole('button', { name: 'Create game' })).toBeInTheDocument();
+    expect(LifecycleWebSocket.instances).toHaveLength(2);
+  } finally {
+    global.WebSocket = originalWebSocket;
+    jest.useRealTimers();
+  }
+});
+
+test('deleting the selected server activates the fallback server resume credentials', () => {
+  const originalWebSocket = global.WebSocket;
+  const confirm = jest.spyOn(window, 'confirm').mockReturnValue(true);
+  global.WebSocket = LifecycleWebSocket as unknown as typeof WebSocket;
+  const timestamp = new Date().toISOString();
+  const clientId = '22222222-2222-4222-8222-222222222222';
+  const profiles = [
+    { id: 'server-a', name: 'Old Server', webSocketURL: 'ws://old.example/ws', createdAt: timestamp, updatedAt: timestamp },
+    { id: 'server-b', name: 'Fallback Server', webSocketURL: 'ws://fallback.example/ws', createdAt: timestamp, updatedAt: timestamp },
+  ];
+  localStorage.setItem(serverProfilesKey, JSON.stringify(profiles));
+  localStorage.setItem(selectedServerIdKey, profiles[0].id);
+  localStorage.setItem('multiplayerClientId', clientId);
+  writeResumeCredentials({
+    serverProfileId: profiles[1].id,
+    serverUrl: profiles[1].webSocketURL,
+    sessionId: 'fallback-session',
+    clientId,
+    playerId: 'fallback-player',
+    roomMode: 'friends',
+  });
+
+  try {
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Manage servers' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Old Server' }));
+
+    expect(screen.getByLabelText('Server')).toHaveDisplayValue('Fallback Server');
+    expect(LifecycleWebSocket.instances).toHaveLength(1);
+    const fallbackConnection = LifecycleWebSocket.instances[0];
+    expect(fallbackConnection.url).toBe(profiles[1].webSocketURL);
+    act(() => fallbackConnection.onopen?.());
+    expect(JSON.parse(fallbackConnection.send.mock.calls[0][0])).toMatchObject({
+      type: 'resumeSession',
+      sessionId: 'fallback-session',
+      clientId,
+    });
+  } finally {
+    confirm.mockRestore();
+    global.WebSocket = originalWebSocket;
+  }
 });
 
 test('a synchronous WebSocket constructor failure returns to disconnected', () => {

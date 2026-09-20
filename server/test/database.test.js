@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { resolveDatabasePath } from "../src/database.js";
 import { latestSchemaVersion } from "../src/migrations.js";
 import { hashResumeToken, RESOURCE_IDS, SessionManager } from "../src/session-manager.js";
 
@@ -34,6 +35,44 @@ test("database initialization applies migrations, pragmas, and stable server met
   assert.equal(second.serverMetadata.serverId, originalId);
   assert.equal(second.serverMetadata.serverName, "Renamed Server");
   second.close();
+});
+
+test("database paths accept filesystem paths and reject unsupported SQLite file URIs", () => {
+  assert.equal(resolveDatabasePath("data/custom.sqlite3"), resolve(process.cwd(), "data/custom.sqlite3"));
+  assert.throws(
+    () => resolveDatabasePath("file:custom.sqlite3?mode=rwc"),
+    /SQLite file: URIs are not supported/,
+  );
+  assert.throws(
+    () => new SessionManager({ databasePath: "file:custom.sqlite3?mode=rwc" }),
+    /SQLite file: URIs are not supported/,
+  );
+});
+
+test("database initialization rejects schemas newer than this server binary", () => {
+  const path = databasePath();
+  const current = new SessionManager({ databasePath: path });
+  current.database.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+    .run(latestSchemaVersion + 1, new Date().toISOString());
+  current.close();
+
+  assert.throws(
+    () => new SessionManager({ databasePath: path }),
+    /Database schema version .* is newer than supported version/,
+  );
+});
+
+test("session capacity bounds persistent database growth and is released by explicit leave", () => {
+  assert.throws(() => new SessionManager({ maxSessions: 0 }), /MAX_SESSIONS must be a positive integer/);
+  const manager = new SessionManager({ maxSessions: 1 });
+  const first = manager.createSession({ clientId: randomUUID(), displayName: "Ada", roomMode: "friends" });
+  const rejected = manager.createSession({ clientId: randomUUID(), displayName: "Ben", roomMode: "friends" });
+
+  assert.equal(rejected.error.code, "SERVER_CAPACITY_REACHED");
+  assert.equal(manager.sessions.size, 1);
+  manager.leave(first.state.sessionId, first.player.playerId);
+  assert.equal(manager.createSession({ clientId: randomUUID(), displayName: "Ben", roomMode: "friends" }).error, undefined);
+  manager.close();
 });
 
 for (const roomMode of ["friends", "private"]) {

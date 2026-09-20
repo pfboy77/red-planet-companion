@@ -6,6 +6,7 @@ import { SessionRepository } from "./repositories/session-repository.js";
 
 export const RESOURCE_IDS = ["MC", "Steel", "Titanium", "Plants", "Energy", "Heat"];
 export const ROOM_MODES = ["friends", "private"];
+export const DEFAULT_MAX_SESSIONS = 1000;
 
 const now = () => new Date().toISOString();
 const resources = () => Object.fromEntries(RESOURCE_IDS.map((id) => [id, { amount: 0, production: 0 }]));
@@ -26,6 +27,13 @@ const createPlayer = (displayName) => ({
   tr: 20,
   resources: resources(),
 });
+const sessionLimit = (value) => {
+  const parsed = Number(value ?? DEFAULT_MAX_SESSIONS);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error("MAX_SESSIONS must be a positive integer");
+  }
+  return parsed;
+};
 
 export const hashResumeToken = (token) => createHash("sha256").update(token).digest("hex");
 
@@ -53,7 +61,8 @@ class RepositorySessionView {
 }
 
 export class SessionManager {
-  constructor({ databasePath = ":memory:", serverName } = {}) {
+  constructor({ databasePath = ":memory:", serverName, maxSessions = process.env.MAX_SESSIONS } = {}) {
+    this.maxSessions = sessionLimit(maxSessions);
     const opened = openDatabase({ databasePath, serverName });
     this.database = opened.database;
     this.databasePath = opened.databasePath;
@@ -69,6 +78,9 @@ export class SessionManager {
   createSession({ clientId, displayName, roomMode = "friends" }) {
     if (!validIdentity(clientId, displayName) || !ROOM_MODES.includes(roomMode)) {
       return { error: error("INVALID_MESSAGE", "A valid clientId, displayName, and roomMode are required") };
+    }
+    if (this.sessionRepository.count() >= this.maxSessions) {
+      return { error: error("SERVER_CAPACITY_REACHED", "The server has reached its session capacity") };
     }
     const timestamp = now();
     const host = createPlayer(displayName);

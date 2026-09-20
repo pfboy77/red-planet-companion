@@ -10,16 +10,20 @@ export const DEFAULT_SERVER_NAME = "Red Planet Server";
 
 export function resolveDatabasePath(value = process.env.DB_PATH) {
   if (!value) return defaultDatabasePath;
-  if (value === ":memory:" || value.startsWith("file:")) return value;
+  if (value === ":memory:") return value;
+  if (value.startsWith("file:")) {
+    throw new Error("DB_PATH must be a filesystem path; SQLite file: URIs are not supported");
+  }
   return isAbsolute(value) ? value : resolve(process.cwd(), value);
 }
 
-export function openDatabase({ databasePath = resolveDatabasePath(), serverName = process.env.SERVER_NAME } = {}) {
-  if (databasePath !== ":memory:" && !databasePath.startsWith("file:")) {
-    mkdirSync(dirname(databasePath), { recursive: true });
+export function openDatabase({ databasePath, serverName = process.env.SERVER_NAME } = {}) {
+  const resolvedDatabasePath = resolveDatabasePath(databasePath);
+  if (resolvedDatabasePath !== ":memory:") {
+    mkdirSync(dirname(resolvedDatabasePath), { recursive: true });
   }
 
-  const database = new Database(databasePath);
+  const database = new Database(resolvedDatabasePath);
   try {
     database.pragma("foreign_keys = ON");
     database.pragma("journal_mode = WAL");
@@ -42,7 +46,7 @@ export function openDatabase({ databasePath = resolveDatabasePath(), serverName 
       metadata = { ...metadata, serverName: serverName.trim() };
     }
 
-    return { database, metadata, databasePath };
+    return { database, metadata, databasePath: resolvedDatabasePath };
   } catch (failure) {
     database.close();
     throw failure;

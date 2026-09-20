@@ -170,6 +170,7 @@ function App() {
     }
     socketRef.current = next;
     next.onopen = () => {
+      if (socketRef.current !== next) return;
       setConnectionState("joining");
       if (resumeCredentials) {
         const identity = resumeCredentials.roomMode === "private"
@@ -180,8 +181,11 @@ function App() {
         afterOpen?.(next);
       }
     };
-    next.onerror = () => setError("Could not connect to the local server.");
+    next.onerror = () => {
+      if (socketRef.current === next) setError("Could not connect to the local server.");
+    };
     next.onmessage = (event) => {
+      if (socketRef.current !== next) return;
       let message: any;
       try { message = JSON.parse(event.data); }
       catch { setError("The local server sent an invalid response."); return; }
@@ -357,19 +361,68 @@ function App() {
   };
   const multiplayerActive = activePlayerId !== null || connectionState !== "disconnected";
   const multiplayerControlsDisabled = multiplayerActive && (connectionState !== "connected" || actionPending || isLeaving);
+  const serverManagementLocked = isLeaving
+    || connectionState === "connected"
+    || connectionState === "connecting"
+    || connectionState === "joining";
 
   const persistServerRegistry = (profiles: ServerProfile[], selectedServerId: string | null) => {
     const next = { profiles, selectedServerId };
     writeServerRegistry(next);
     setServerRegistry(next);
   };
+  const resetConnectionForServerChange = () => {
+    clearReconnectTimer();
+    closeCurrentSocket();
+    pendingActionIdRef.current = null;
+    setActionPending(false);
+    setConnectionReplaced(false);
+    setConnectionState("disconnected");
+    setSession(null);
+    setError(null);
+  };
+  const activateServerProfile = (profile: ServerProfile, profiles = serverRegistry.profiles) => {
+    if (serverManagementLocked) return;
+    resetConnectionForServerChange();
+    persistServerRegistry(profiles, profile.id);
+    setServerUrl(profile.webSocketURL);
+    setJoinCode("");
+
+    const credentials = readResumeCredentialsForServer(profile);
+    if (!credentials || credentials.clientId !== clientId) {
+      resumeCredentialsRef.current = null;
+      setActivePlayerId(null);
+      setJoinSessionId("");
+      setRoomMode("friends");
+      if (credentials) clearResumeCredentials(profile.id);
+      return;
+    }
+
+    resumeCredentialsRef.current = credentials;
+    setActivePlayerId(credentials.playerId);
+    setJoinSessionId(credentials.sessionId);
+    setRoomMode(credentials.roomMode);
+    openConnection(profile.webSocketURL, undefined, credentials);
+  };
+  const clearSelectedServer = (profiles: ServerProfile[]) => {
+    resetConnectionForServerChange();
+    resumeCredentialsRef.current = null;
+    setActivePlayerId(null);
+    setServerUrl("");
+    setJoinSessionId("");
+    setJoinCode("");
+    setRoomMode("friends");
+    persistServerRegistry(profiles, null);
+  };
   const beginAddingServer = () => {
+    if (serverManagementLocked) return;
     setEditingServerId("new");
     setServerNameDraft("");
     setServerUrlDraft("");
     setServerFormError(null);
   };
   const beginEditingServer = (profile: ServerProfile) => {
+    if (serverManagementLocked) return;
     setEditingServerId(profile.id);
     setServerNameDraft(profile.name);
     setServerUrlDraft(profile.webSocketURL);
@@ -380,6 +433,7 @@ function App() {
     setServerFormError(null);
   };
   const saveServerProfile = () => {
+    if (serverManagementLocked) return;
     const name = serverNameDraft.trim();
     const normalizedUrl = normalizeWebSocketUrl(serverUrlDraft);
     if (!name || name.length > 50) {
@@ -394,49 +448,42 @@ function App() {
     if (editingServerId === "new") {
       const created: ServerProfile = { id: id(), name, webSocketURL: normalizedUrl, createdAt: timestamp, updatedAt: timestamp };
       const selectedId = serverRegistry.selectedServerId ?? created.id;
-      persistServerRegistry([...serverRegistry.profiles, created], selectedId);
-      if (selectedId === created.id) setServerUrl(created.webSocketURL);
+      const profiles = [...serverRegistry.profiles, created];
+      if (selectedId === created.id) activateServerProfile(created, profiles);
+      else persistServerRegistry(profiles, selectedId);
     } else {
       const previous = serverRegistry.profiles.find(profile => profile.id === editingServerId);
       if (!previous) return;
-      if (normalizeWebSocketUrl(previous.webSocketURL) !== normalizedUrl) clearResumeCredentials(previous.id);
+      const urlChanged = normalizeWebSocketUrl(previous.webSocketURL) !== normalizedUrl;
+      if (urlChanged) clearResumeCredentials(previous.id);
       const updated = { ...previous, name, webSocketURL: normalizedUrl, updatedAt: timestamp };
-      persistServerRegistry(serverRegistry.profiles.map(profile => profile.id === updated.id ? updated : profile), serverRegistry.selectedServerId);
-      if (serverRegistry.selectedServerId === updated.id) setServerUrl(updated.webSocketURL);
+      const profiles = serverRegistry.profiles.map(profile => profile.id === updated.id ? updated : profile);
+      if (serverRegistry.selectedServerId === updated.id && urlChanged) activateServerProfile(updated, profiles);
+      else {
+        persistServerRegistry(profiles, serverRegistry.selectedServerId);
+        if (serverRegistry.selectedServerId === updated.id) setServerUrl(updated.webSocketURL);
+      }
     }
     setEditingServerId(null);
     setServerFormError(null);
   };
   const selectServerProfile = (profileId: string) => {
-    if (multiplayerActive) return;
     const profile = serverRegistry.profiles.find(candidate => candidate.id === profileId);
     if (!profile) return;
-    persistServerRegistry(serverRegistry.profiles, profile.id);
-    setServerUrl(profile.webSocketURL);
-    setError(null);
-    const credentials = readResumeCredentialsForServer(profile);
-    resumeCredentialsRef.current = credentials;
-    setActivePlayerId(credentials?.playerId ?? null);
-    if (!credentials) return;
-    setJoinSessionId(credentials.sessionId);
-    setRoomMode(credentials.roomMode);
-    if (credentials.clientId !== clientId) {
-      resumeCredentialsRef.current = null;
-      setActivePlayerId(null);
-      clearResumeCredentials(profile.id);
-      return;
-    }
-    openConnection(profile.webSocketURL, undefined, credentials);
+    activateServerProfile(profile);
   };
   const deleteServerProfile = (profile: ServerProfile) => {
+    if (serverManagementLocked) return;
     if (!window.confirm(`Delete ${profile.name}?`)) return;
     clearResumeCredentials(profile.id);
     const profiles = serverRegistry.profiles.filter(candidate => candidate.id !== profile.id);
-    const selectedId = serverRegistry.selectedServerId === profile.id
-      ? profiles[0]?.id ?? null
-      : serverRegistry.selectedServerId;
-    persistServerRegistry(profiles, selectedId);
-    if (selectedId !== serverRegistry.selectedServerId) setServerUrl(profiles.find(candidate => candidate.id === selectedId)?.webSocketURL ?? "");
+    if (serverRegistry.selectedServerId === profile.id) {
+      const fallback = profiles[0];
+      if (fallback) activateServerProfile(fallback, profiles);
+      else clearSelectedServer(profiles);
+    } else {
+      persistServerRegistry(profiles, serverRegistry.selectedServerId);
+    }
     if (editingServerId === profile.id) cancelEditingServer();
   };
 
@@ -559,7 +606,7 @@ function App() {
               aria-label="Server"
               value={serverRegistry.selectedServerId ?? ""}
               onChange={event => selectServerProfile(event.target.value)}
-              disabled={multiplayerActive || serverRegistry.profiles.length === 0}
+              disabled={serverManagementLocked || serverRegistry.profiles.length === 0}
               style={{ flex: 1, minHeight: 44 }}
             >
               {serverRegistry.profiles.length === 0 && <option value="">Add a server first</option>}
@@ -579,13 +626,13 @@ function App() {
                   <div><strong>{profile.name}</strong>{profile.id === serverRegistry.selectedServerId ? " · Selected" : ""}</div>
                   <div style={{ overflowWrap: "anywhere" }}>{profile.webSocketURL}</div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
-                    {profile.id !== serverRegistry.selectedServerId && <button type="button" onClick={() => selectServerProfile(profile.id)} disabled={multiplayerActive} style={{ minHeight: 44 }}>Select {profile.name}</button>}
-                    <button type="button" onClick={() => beginEditingServer(profile)} disabled={multiplayerActive} style={{ minHeight: 44 }}>Edit {profile.name}</button>
-                    <button type="button" onClick={() => deleteServerProfile(profile)} disabled={multiplayerActive} style={{ minHeight: 44, color: "#b42318" }}>Delete {profile.name}</button>
+                    {profile.id !== serverRegistry.selectedServerId && <button type="button" onClick={() => selectServerProfile(profile.id)} disabled={serverManagementLocked} style={{ minHeight: 44 }}>Select {profile.name}</button>}
+                    <button type="button" onClick={() => beginEditingServer(profile)} disabled={serverManagementLocked} style={{ minHeight: 44 }}>Edit {profile.name}</button>
+                    <button type="button" onClick={() => deleteServerProfile(profile)} disabled={serverManagementLocked} style={{ minHeight: 44, color: "#b42318" }}>Delete {profile.name}</button>
                   </div>
                 </li>)}
               </ul>}
-            <button type="button" onClick={beginAddingServer} disabled={multiplayerActive} style={{ minHeight: 44 }}>Add server</button>
+            <button type="button" onClick={beginAddingServer} disabled={serverManagementLocked} style={{ minHeight: 44 }}>Add server</button>
             {editingServerId && <fieldset style={{ display: "grid", gap: 8 }}>
               <legend>{editingServerId === "new" ? "Add server" : "Edit server"}</legend>
               <label htmlFor="server-name">Server name</label>
@@ -656,7 +703,7 @@ function App() {
         </button>
       </div>
 
-      {error && <div style={{ color: "red", marginBottom: 8 }}>{error}</div>}
+      {error && <div role="alert" style={{ color: "red", marginBottom: 8 }}>{error}</div>}
 
       <div
         style={{

@@ -88,7 +88,7 @@ Open http://localhost:3000 in your browser.
    DBの既定保存先は `server/data/red-planet.sqlite3` です。保存先や表示名は環境変数で変更できます。
 
    ```bash
-   DB_PATH=/var/lib/red-planet/red-planet.sqlite3 SERVER_NAME="Home Red Planet Server" npm start
+   DB_PATH=/var/lib/red-planet/red-planet.sqlite3 SERVER_NAME="Home Red Planet Server" MAX_SESSIONS=1000 npm start
    ```
 
 2. 別のターミナルでWebアプリを起動します。
@@ -134,6 +134,8 @@ XcodeでiOSアプリを起動した後、ホーム画面の **サーバーを管
 - 処理済みaction ID（セッションごとに最新1000件）
 
 raw Private resume tokenとWebSocket接続自体は保存しません。ソロプレイの保存方式は従来どおり各端末ローカルです。`GET /health` は `status`、永続 `serverId`、`serverName`、`protocolVersion` を返し、DB pathやcredentialは返しません。
+
+永続セッション数は既定で最大1000件に制限され、`MAX_SESSIONS` で変更できます。上限到達時は既存sessionが明示的に退出・削除されるまで新規作成を拒否します。インターネット公開時は、この上限に加えてreverse proxy側の接続・リクエストrate limitと、未使用sessionの保持・cleanup方針を設定してください。
 
 iOS版の提出準備と実機確認手順は [iOSリリース・チェックリスト](docs/IOS_RELEASE_CHECKLIST.md) を参照してください。
 

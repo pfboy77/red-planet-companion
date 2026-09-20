@@ -78,6 +78,8 @@ const migrations = [
   },
 ];
 
+export const latestSchemaVersion = migrations.at(-1)?.version ?? 0;
+
 export function runMigrations(database) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -85,6 +87,14 @@ export function runMigrations(database) {
       applied_at TEXT NOT NULL
     );
   `);
+
+  const databaseSchemaVersion = database.prepare("SELECT MAX(version) AS version FROM schema_migrations")
+    .get().version ?? 0;
+  if (databaseSchemaVersion > latestSchemaVersion) {
+    throw new Error(
+      `Database schema version ${databaseSchemaVersion} is newer than supported version ${latestSchemaVersion}`,
+    );
+  }
 
   const applied = new Set(
     database.prepare("SELECT version FROM schema_migrations").all().map(({ version }) => version),
@@ -99,5 +109,3 @@ export function runMigrations(database) {
     if (!applied.has(migration.version)) apply(migration);
   }
 }
-
-export const latestSchemaVersion = migrations.at(-1)?.version ?? 0;

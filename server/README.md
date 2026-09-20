@@ -32,8 +32,16 @@ SERVER_NAME="Home Red Planet Server" npm start
 ```
 
 `HOST` and `PORT` remain configurable; their defaults are `0.0.0.0` and `8080`.
+`MAX_SESSIONS` is a positive integer and defaults to `1000`; once reached, new
+session creation is rejected until an existing session is explicitly left and
+deleted. This bounds persistent database growth. `DB_PATH` must be a normal
+filesystem path; SQLite `file:` URI filenames are not supported.
+
 For internet deployment, terminate TLS in a reverse proxy such as Caddy and
-register its `wss://` URL in the clients.
+register its `wss://` URL in the clients. Also add reverse-proxy connection and
+request rate limits, and define an inactive-session retention/cleanup policy;
+the session cap limits disk growth but is not a complete public-service DoS
+defense.
 
 ## Persistence
 
@@ -50,7 +58,8 @@ The SQLite database stores:
 It does not store raw Private resume tokens or WebSocket connections. All
 schema changes run through the `schema_migrations` table at startup. Existing
 players are marked disconnected on startup and become connected again only
-after a successful resume.
+after a successful resume. A server binary refuses to open a database whose
+schema version is newer than the binary supports.
 
 `GET /health` keeps `status: "ok"` and also returns `serverId`, `serverName`, and
 `protocolVersion`. It never exposes the database path or credentials.
