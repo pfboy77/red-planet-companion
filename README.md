@@ -161,3 +161,24 @@ This project is an unofficial fan-made application for educational and non-comme
 ## License
 
 MIT
+
+## iOS release and public-server operation
+
+The iOS shipping Bundle ID is `hoshino.redplanetcompanion` (product name: Red Planet
+Companion). Home → App Information provides privacy/support links, version,
+license information, the unofficial-app disclaimer and confirmed local-data deletion.
+The iOS client stores resume metadata and Keychain tokens independently per saved
+server. If an old server cannot be reached, starting solo offers an explicit local
+resume discard after the leave attempt times out.
+
+Do not expose the bare Node server directly to the internet. Use a TLS reverse
+proxy with connection and request/message rate limits, firewall/network controls,
+`wss://` for internet access, and consistent SQLite backups when games matter.
+`ws://` is for trusted LANs. Inactive sessions default to 30 days of retention;
+cleanup runs at startup and session creation and excludes connected sessions.
+See [server operation](server/README.md) for `SESSION_RETENTION_DAYS` and limitations.
+
+Before submission, complete the [iOS release checklist](docs/IOS_RELEASE_CHECKLIST.md),
+[privacy policy](docs/PRIVACY_POLICY.md), [review notes](docs/APP_STORE_METADATA.md)
+and [IP checklist](docs/IP_RELEASE_CHECKLIST.md). Production privacy/support URLs
+and a working review server remain owner-supplied release blockers.

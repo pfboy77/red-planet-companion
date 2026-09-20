@@ -8,7 +8,7 @@ enum MainTab: Hashable {
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @State private var viewModel = GameViewModel()
+    @State private var viewModel = makeApplicationViewModel()
     @State private var selectedTab: MainTab = .home
 
     var body: some View {
@@ -89,4 +89,27 @@ private struct ScreenNavigationBar: View {
 
 #Preview {
     ContentView()
+}
+
+@MainActor
+private func makeApplicationViewModel() -> GameViewModel {
+    #if DEBUG
+    if ProcessInfo.processInfo.arguments.contains("-UITesting") {
+        let defaults = UserDefaults(suiteName: "RedPlanetUITests")!
+        let tokens = KeychainResumeTokenStore(service: "red-planet-companion.ui-tests")
+        let model = GameViewModel(defaults: defaults, tokenStore: tokens)
+        if !ProcessInfo.processInfo.arguments.contains("-UITestingPreserveData") {
+            model.deleteAllLocalData()
+        }
+        if ProcessInfo.processInfo.arguments.contains("-UITestingOfflineResume") {
+            defaults.set("ws://127.0.0.1:1/ws", forKey: "MultiplayerServerURL")
+            defaults.set("offline-session", forKey: "MultiplayerSessionID")
+            defaults.set("offline-player", forKey: "MultiplayerPlayerID")
+            defaults.set("ABC234", forKey: "MultiplayerJoinCode")
+            return GameViewModel(defaults: defaults, tokenStore: tokens)
+        }
+        return model
+    }
+    #endif
+    return GameViewModel()
 }

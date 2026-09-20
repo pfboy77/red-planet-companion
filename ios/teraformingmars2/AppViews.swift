@@ -6,15 +6,29 @@ struct HomeView: View {
     var enterGame: () -> Void
     @State private var copiedMessage: String?
     @State private var showingServerManager = false
+    @State private var showingAbout = false
+    @State private var confirmingForget = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Red Planet Companion").font(.largeTitle.bold())
+                Button("アプリ情報", systemImage: "info.circle") { showingAbout = true }
+                    .accessibilityLabel("アプリ情報、プライバシーとサポート")
+                    .accessibilityIdentifier("aboutButton")
                 if viewModel.multiplayerSession != nil {
                     SessionInfoCard(viewModel: viewModel, copiedMessage: $copiedMessage, enterGame: enterGame)
+                    Button("ソロモードを開始") {
+                        viewModel.startSoloGame()
+                        if viewModel.gameMode == .solo { enterGame() }
+                    }
+                        .disabled(viewModel.isLeavingMultiplayer)
+                        .accessibilityIdentifier("startSoloButton")
                 } else {
-                    Button("ソロモードを開始") { viewModel.startSoloGame() }
+                    Button("ソロモードを開始") {
+                        viewModel.startSoloGame()
+                        if viewModel.gameMode == .solo { enterGame() }
+                    }
                         .buttonStyle(.borderedProminent)
                         .accessibilityIdentifier("startSoloButton")
 
@@ -41,6 +55,20 @@ struct HomeView: View {
         }
         .sheet(isPresented: $showingServerManager) {
             ServerManagerView(viewModel: viewModel)
+        }
+        .sheet(isPresented: $showingAbout) { AboutView(viewModel: viewModel) }
+        .alert("前回のサーバーに接続できません", isPresented: Bindable(viewModel).showingOfflineSoloChoice) {
+            Button("再試行") { viewModel.startSoloGame() }
+            Button("再接続情報をこの端末から削除してソロを開始", role: .destructive) { confirmingForget = true }
+            Button("キャンセル", role: .cancel) { }
+        } message: {
+            Text("再接続情報は保持されています。サーバーに接続せず、端末内の再接続情報を削除してソロを開始することもできます。")
+        }
+        .alert("再接続情報を削除しますか？", isPresented: $confirmingForget) {
+            Button("削除してソロを開始", role: .destructive) { viewModel.forgetResumeAndStartSolo() }
+            Button("キャンセル", role: .cancel) { }
+        } message: {
+            Text("選択中のサーバーの再接続情報だけを削除します。サーバー上のデータは削除されません。")
         }
     }
 
@@ -431,4 +459,79 @@ struct PlayerResourceCardView: View {
             }
         }.padding().frame(maxWidth: .infinity, alignment: .leading).background(Color(.systemGray6)).clipShape(RoundedRectangle(cornerRadius: 12))
     }
+}
+
+// RELEASE BLOCKER: replace these HTTPS placeholders with published production pages.
+enum AppInformation {
+    static let PRIVACY_POLICY_URL = URL(string: "https://example.com/red-planet-companion/privacy")!
+    static let SUPPORT_URL = URL(string: "https://example.com/red-planet-companion/support")!
+    static var version: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        return "\(info["CFBundleShortVersionString"] as? String ?? "—") (\(info["CFBundleVersion"] as? String ?? "—"))"
+    }
+}
+
+struct AboutView: View {
+    var viewModel: GameViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmingDeletion = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("アプリ情報") {
+                    Text("Red Planet Companion")
+                    Text("バージョン \(AppInformation.version)").accessibilityIdentifier("appVersion")
+                    Text("Red Planet Companion は非公式のゲーム補助アプリです。本アプリは、関連するボードゲームの権利者による承認、提携、後援を受けたものではありません。")
+                }
+                Section("プライバシーとサポート") {
+                    Link("プライバシーポリシー", destination: AppInformation.PRIVACY_POLICY_URL)
+                        .accessibilityLabel("プライバシーポリシーをブラウザで開く")
+                        .accessibilityIdentifier("privacyLink")
+                    Link("サポート", destination: AppInformation.SUPPORT_URL)
+                        .accessibilityLabel("サポートをブラウザで開く")
+                        .accessibilityIdentifier("supportLink")
+                }
+                Section("オープンソース・ライセンス") {
+                    Text("本プロジェクトは MIT License で提供されています。iOSアプリはAppleの標準フレームワークを使用しています。")
+                    Text(AppInformation.license).font(.caption).textSelection(.enabled)
+                }
+                Section {
+                    Button("この端末の保存データを削除", role: .destructive) { confirmingDeletion = true }
+                        .accessibilityLabel("この端末の保存データを削除、確認画面を表示")
+                        .accessibilityIdentifier("deleteLocalDataButton")
+                    if let error = viewModel.multiplayerError { Text(error).foregroundStyle(.red) }
+                } footer: {
+                    Text("ソロの状態、表示名、登録サーバー、すべての再接続情報を削除します。サーバー上のデータには影響しません。")
+                }
+            }
+            .navigationTitle("アプリ情報")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完了") { dismiss() } } }
+            .alert("この端末の保存データを削除しますか？", isPresented: $confirmingDeletion) {
+                Button("すべての保存データを削除", role: .destructive) {
+                    if viewModel.deleteAllLocalData() { dismiss() }
+                }
+                Button("キャンセル", role: .cancel) { }
+            }
+        }
+    }
+}
+
+extension AppInformation {
+    static let license = """
+MIT License
+
+Copyright (c) 2026 Masafumi Hoshino
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+"""
 }

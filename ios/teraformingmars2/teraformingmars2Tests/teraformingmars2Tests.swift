@@ -47,10 +47,17 @@ private final class FakeMultiplayerClient: MultiplayerClient {
 }
 
 private final class InMemoryResumeTokenStore: ResumeTokenStore {
-    var token: String?
-    func load() -> String? { token }
-    func save(_ token: String) { self.token = token }
-    func remove() { token = nil }
+    var tokens: [String: String] = [:]
+    var failWrites = false
+    var token: String? { tokens.values.first }
+    func load(profileID: UUID?) -> String? { tokens[profileID?.uuidString ?? "legacy"] }
+    func save(_ token: String, profileID: UUID?) -> Bool {
+        guard !failWrites else { return false }
+        tokens[profileID?.uuidString ?? "legacy"] = token
+        return true
+    }
+    func remove(profileID: UUID?) -> Bool { tokens.removeValue(forKey: profileID?.uuidString ?? "legacy"); return true }
+    func removeAll() -> Bool { tokens = [:]; return true }
 }
 
 struct GameReducerTests {
@@ -497,7 +504,7 @@ struct ViewModelTests {
         #expect(!vm.isLeavingMultiplayer)
         #expect(vm.canResumeSession)
         #expect(tokenStore.token == testResumeToken)
-        #expect(client.disconnectCallCount == 0)
+        #expect(client.disconnectCallCount == 1)
         #expect(vm.multiplayerError?.contains("保持") == true)
     }
 
@@ -557,7 +564,7 @@ struct ViewModelTests {
         #expect(tokenStore.token == testResumeToken)
         #expect(vm.canResumeSession)
         #expect(!vm.isLeavingMultiplayer)
-        #expect(client.disconnectCallCount == 0)
+        #expect(client.disconnectCallCount == 1)
         #expect(vm.multiplayerError?.contains("保持") == true)
     }
 
@@ -748,6 +755,188 @@ struct ViewModelTests {
         #expect(vm.saveServerProfile(id: nil, name: "", webSocketURL: "ws://localhost:8080/ws") != nil)
         #expect(vm.saveServerProfile(id: nil, name: "Bad", webSocketURL: "https://example.com") != nil)
         #expect(vm.serverProfiles.isEmpty)
+    }
+
+    @Test func independentPrivateServersSurviveSwitchRestartDeleteAndURLEdit() {
+        let defaults = isolatedDefaults()
+        let client = FakeMultiplayerClient()
+        let tokens = InMemoryResumeTokenStore()
+        let vm = connectedViewModel(defaults: defaults, client: client, multiplayerTR: 20, tokenStore: tokens)
+        let a = vm.selectedServerID!
+        client.failConnection()
+        _ = vm.saveServerProfile(id: nil, name: "B", webSocketURL: "wss://b.example.com/ws")
+        let b = vm.serverProfiles.last!.id
+        vm.selectServerProfile(id: b)
+        vm.roomMode = .private
+        vm.createMultiplayerGame()
+        client.deliver(["type": "connectionState", "state": "connected"])
+        let bSession = UUID().uuidString.lowercased()
+        var bState = sessionObject(revision: 0, playerRevision: 0, tr: 20)
+        bState["sessionId"] = bSession
+        client.deliver(["type": "sessionCreated", "sessionId": bSession, "joinCode": "ABC234",
+            "playerId": testPlayerID, "roomMode": "private", "resumeToken": "test-token-b", "sessionState": bState])
+        client.failConnection()
+        #expect(vm.canResumeSession && vm.sessionID == bSession)
+        #expect(tokens.load(profileID: b) == "test-token-b")
+        vm.selectServerProfile(id: a)
+        #expect(vm.canResumeSession && vm.sessionID == testSessionID)
+        #expect(tokens.load(profileID: a) == testResumeToken)
+        let encoded = String(data: defaults.data(forKey: "RedPlanetServerResumeCredentials")!, encoding: .utf8)!
+        #expect(!encoded.contains(testResumeToken) && !encoded.contains("test-token-b"))
+        #expect(defaults.string(forKey: "MultiplayerResumeToken") == nil)
+        let restored = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: tokens)
+        #expect(restored.canResumeSession && restored.sessionID == testSessionID)
+        restored.selectServerProfile(id: b)
+        #expect(restored.canResumeSession && restored.sessionID == bSession)
+        restored.deleteServerProfile(id: b)
+        #expect(restored.canResumeSession && restored.sessionID == testSessionID)
+        #expect(tokens.load(profileID: a) == testResumeToken)
+        #expect(tokens.load(profileID: b) == nil)
+    }
+
+    @Test func changingOtherServerURLInvalidatesOnlyThatProfile() {
+        let defaults = isolatedDefaults()
+        let client = FakeMultiplayerClient()
+        let tokens = InMemoryResumeTokenStore()
+        let vm = connectedViewModel(defaults: defaults, client: client, multiplayerTR: 20, tokenStore: tokens)
+        let a = vm.selectedServerID!
+        client.failConnection()
+        _ = vm.saveServerProfile(id: nil, name: "B", webSocketURL: "wss://b.example.com/ws")
+        let b = vm.serverProfiles.last!.id
+        // Seed B independently through the persisted non-secret metadata model.
+        let aData = try! JSONDecoder().decode([ServerResumeCredentials].self, from: defaults.data(forKey: "RedPlanetServerResumeCredentials")!)
+        let bData = ServerResumeCredentials(serverProfileID: b, serverURL: "wss://b.example.com/ws", sessionID: "b-session", joinCode: "ABC234", playerID: "b-player", roomMode: .private)
+        defaults.set(try! JSONEncoder().encode(aData + [bData]), forKey: "RedPlanetServerResumeCredentials")
+        _ = tokens.save("test-token-b", profileID: b)
+        let restored = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: tokens)
+        restored.selectServerProfile(id: b)
+        _ = restored.saveServerProfile(id: a, name: "A changed", webSocketURL: "wss://changed.example.com/ws")
+        #expect(restored.canResumeSession && restored.sessionID == "b-session")
+        #expect(tokens.load(profileID: a) == nil)
+        #expect(tokens.load(profileID: b) == "test-token-b")
+        restored.selectServerProfile(id: a)
+        #expect(!restored.canResumeSession)
+    }
+
+    @Test func deletingOtherServerPreservesPrivateResume() {
+        let defaults = isolatedDefaults()
+        let client = FakeMultiplayerClient()
+        let tokens = InMemoryResumeTokenStore()
+        let vm = connectedViewModel(defaults: defaults, client: client, multiplayerTR: 20, tokenStore: tokens)
+        let a = vm.selectedServerID!
+        client.failConnection()
+        _ = vm.saveServerProfile(id: nil, name: "B", webSocketURL: "wss://b.example.com/ws")
+        let b = vm.serverProfiles.last!.id
+        vm.selectServerProfile(id: b)
+        vm.deleteServerProfile(id: b)
+        #expect(vm.canResumeSession)
+        #expect(tokens.load(profileID: a) == testResumeToken)
+    }
+
+    @Test func legacyMigrationRequiresUnambiguousURLAndSuccessfulKeychainWrite() {
+        let defaults = isolatedDefaults()
+        let tokens = InMemoryResumeTokenStore()
+        defaults.set("ws://old.example.com/ws", forKey: "MultiplayerServerURL")
+        defaults.set(testSessionID, forKey: "MultiplayerSessionID")
+        defaults.set(testPlayerID, forKey: "MultiplayerPlayerID")
+        defaults.set("private", forKey: "MultiplayerRoomMode")
+        _ = tokens.save(testResumeToken, profileID: nil)
+        tokens.failWrites = true
+        let failed = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: tokens)
+        #expect(!failed.canResumeSession)
+        #expect(tokens.load(profileID: nil) == testResumeToken)
+        #expect(defaults.string(forKey: "MultiplayerSessionID") == testSessionID)
+        tokens.failWrites = false
+        let migrated = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: tokens)
+        #expect(migrated.canResumeSession)
+        #expect(tokens.load(profileID: migrated.selectedServerID) == testResumeToken)
+        #expect(tokens.load(profileID: nil) == nil)
+        #expect(defaults.string(forKey: "MultiplayerSessionID") == nil)
+    }
+
+    @Test func realKeychainKeepsProfilesSeparateAndClearsLegacyAndOrphans() {
+        let store = KeychainResumeTokenStore(service: "red-planet-companion.tests.\(UUID().uuidString)")
+        defer { _ = store.removeAll() }
+        let a = UUID()
+        let b = UUID()
+        #expect(store.save("test-a", profileID: a))
+        #expect(store.save("test-b", profileID: b))
+        #expect(store.save("test-legacy", profileID: nil))
+        #expect(store.load(profileID: a) == "test-a")
+        #expect(store.load(profileID: b) == "test-b")
+        #expect(store.save("test-a-updated", profileID: a))
+        #expect(store.remove(profileID: b))
+        #expect(store.load(profileID: a) == "test-a-updated")
+        #expect(store.load(profileID: b) == nil)
+        #expect(store.removeAll())
+        #expect(store.load(profileID: a) == nil)
+        #expect(store.load(profileID: nil) == nil)
+    }
+
+    @Test func ambiguousLegacyCredentialDoesNotAttachToSelectedServer() {
+        let defaults = isolatedDefaults()
+        let date = Date()
+        let profiles = ["A", "B"].map { ServerProfile(id: UUID(), name: $0, webSocketURL: "wss://same.example.com/ws", createdAt: date, updatedAt: date) }
+        ServerProfileStore(defaults: defaults).save(ServerProfileRegistry(profiles: profiles, selectedServerID: profiles[0].id))
+        defaults.set("wss://same.example.com/ws", forKey: "MultiplayerServerURL")
+        defaults.set(testSessionID, forKey: "MultiplayerSessionID")
+        defaults.set(testPlayerID, forKey: "MultiplayerPlayerID")
+        let tokens = InMemoryResumeTokenStore()
+        _ = tokens.save(testResumeToken, profileID: nil)
+        let vm = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: tokens)
+        #expect(!vm.canResumeSession)
+        #expect(tokens.load(profileID: profiles[0].id) == nil)
+        #expect(tokens.load(profileID: nil) == testResumeToken)
+        _ = vm.saveServerProfile(id: nil, name: "C", webSocketURL: "wss://different.example.com/ws")
+        let c = vm.serverProfiles.last!.id
+        vm.selectServerProfile(id: c)
+        let restarted = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: tokens)
+        #expect(!restarted.canResumeSession)
+        #expect(tokens.load(profileID: c) == nil)
+        #expect(defaults.string(forKey: "MultiplayerResumeServerURL") == "wss://same.example.com/ws")
+    }
+
+    @Test func localDeletionClearsOwnedStateAndPreservesOtherDefaults() {
+        let defaults = isolatedDefaults()
+        defaults.set("keep", forKey: "UnrelatedComponent")
+        let client = FakeMultiplayerClient()
+        let tokens = InMemoryResumeTokenStore()
+        let vm = connectedViewModel(defaults: defaults, client: client, multiplayerTR: 20, tokenStore: tokens)
+        let oldID = vm.clientIdentifier
+        _ = tokens.save("orphan-test-token", profileID: UUID())
+        _ = tokens.save("legacy-test-token", profileID: nil)
+        vm.savePersistentState()
+        #expect(vm.deleteAllLocalData())
+        #expect(tokens.tokens.isEmpty)
+        #expect(vm.gameMode == .none)
+        #expect(vm.clientIdentifier != oldID)
+        #expect(vm.undoStack.isEmpty && vm.redoStack.isEmpty && vm.deltaValues.isEmpty)
+        #expect(defaults.string(forKey: "UnrelatedComponent") == "keep")
+        #expect(defaults.data(forKey: "GameStateKey") == nil)
+        let restored = GameViewModel(defaults: defaults, multiplayerClient: FakeMultiplayerClient(), tokenStore: tokens)
+        #expect(restored.serverProfiles.isEmpty)
+        #expect(!restored.canResumeSession)
+        #expect(restored.displayName.isEmpty)
+        #expect(restored.tr == 20)
+    }
+
+    @Test func unreachableSoloRequiresExplicitDiscardAndPreservesOtherProfiles() async {
+        let client = FakeMultiplayerClient()
+        let tokens = InMemoryResumeTokenStore()
+        let vm = connectedViewModel(defaults: isolatedDefaults(), client: client, multiplayerTR: 20,
+            tokenStore: tokens, leaveAcknowledgementTimeoutNanoseconds: 1_000_000)
+        client.failConnection()
+        vm.startSoloGame()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        #expect(vm.showingOfflineSoloChoice)
+        #expect(vm.canResumeSession)
+        #expect(vm.gameMode != .solo)
+        let sentCount = client.sentMessages.count
+        vm.forgetResumeAndStartSolo()
+        #expect(vm.gameMode == .solo)
+        #expect(!vm.canResumeSession)
+        #expect(tokens.tokens.isEmpty)
+        #expect(client.sentMessages.count == sentCount)
     }
 
     private var testSessionID: String { "00000000-0000-4000-8000-000000000111" }

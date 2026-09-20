@@ -3,17 +3,19 @@ import Observation
 import Security
 
 protocol ResumeTokenStore {
-    func load() -> String?
-    func save(_ token: String)
-    func remove()
+    func load(profileID: UUID?) -> String?
+    @discardableResult func save(_ token: String, profileID: UUID?) -> Bool
+    @discardableResult func remove(profileID: UUID?) -> Bool
+    @discardableResult func removeAll() -> Bool
 }
 
 final class KeychainResumeTokenStore: ResumeTokenStore {
-    private let service = "red-planet-companion.multiplayer"
-    private let account = "private-resume-token"
+    private let service: String
 
-    func load() -> String? {
-        var query = baseQuery
+    init(service: String = "red-planet-companion.multiplayer") { self.service = service }
+
+    func load(profileID: UUID?) -> String? {
+        var query = baseQuery(profileID: profileID)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -22,18 +24,36 @@ final class KeychainResumeTokenStore: ResumeTokenStore {
         return String(data: data, encoding: .utf8)
     }
 
-    func save(_ token: String) {
-        remove()
-        var query = baseQuery
-        query[kSecValueData as String] = Data(token.utf8)
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(query as CFDictionary, nil)
+    @discardableResult
+    func save(_ token: String, profileID: UUID?) -> Bool {
+        let query = baseQuery(profileID: profileID)
+        let values: [String: Any] = [kSecValueData as String: Data(token.utf8)]
+        let status = SecItemUpdate(query as CFDictionary, values as CFDictionary)
+        if status == errSecSuccess { return true }
+        guard status == errSecItemNotFound else { return false }
+        var item = query.merging(values) { _, new in new }
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
     }
 
-    func remove() { SecItemDelete(baseQuery as CFDictionary) }
+    @discardableResult
+    func remove(profileID: UUID?) -> Bool {
+        let status = SecItemDelete(baseQuery(profileID: profileID) as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
 
-    private var baseQuery: [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
+    @discardableResult
+    func removeAll() -> Bool {
+        let status = SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+        ] as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
+    private func baseQuery(profileID: UUID?) -> [String: Any] {
+        let account = "private-resume-token" + (profileID.map { "." + $0.uuidString.lowercased() } ?? "")
+        return [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
     }
 }
 
@@ -76,6 +96,7 @@ private struct PendingMultiplayerAction {
 @Observable
 final class GameViewModel {
     private enum Keys {
+        static let resumeCredentials = "RedPlanetServerResumeCredentials"
         static let gameState = "GameStateKey"
         static let clientID = "MultiplayerClientID"
         static let serverURL = "MultiplayerServerURL"
@@ -107,10 +128,11 @@ final class GameViewModel {
     var isLeavingMultiplayer = false
     var connectionState: MultiplayerConnectionState = .disconnected
     var gameMode: GameMode = .none
+    var showingOfflineSoloChoice = false
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let serverProfileStore: ServerProfileStore
-    private let clientID: String
+    private var clientID: String
     private var activePlayerID: String?
     @ObservationIgnored private let multiplayerClient: MultiplayerClient
     @ObservationIgnored private let tokenStore: ResumeTokenStore
@@ -118,6 +140,7 @@ final class GameViewModel {
     private var pendingActions: [PendingMultiplayerAction] = []
     private var actionInFlight: PendingMultiplayerAction?
     @ObservationIgnored private var waitingForFreshSnapshot = false
+    @ObservationIgnored private var savedCredentials: [ServerResumeCredentials] = []
     @ObservationIgnored private var resumeToken: String?
     @ObservationIgnored private var credentialServerProfileID: UUID?
     @ObservationIgnored private var credentialServerURL: String?
@@ -167,11 +190,6 @@ final class GameViewModel {
         let resolvedServerURL = registry.profiles.first { $0.id == registry.selectedServerID }?.webSocketURL
             ?? defaults.string(forKey: Keys.serverURL)
             ?? ""
-        let storedPlayerID = defaults.string(forKey: Keys.playerID)
-        let storedCredentialURL = defaults.string(forKey: Keys.resumeServerURL)
-            ?? (storedPlayerID == nil ? nil : resolvedServerURL)
-        let storedCredentialProfileID = defaults.string(forKey: Keys.resumeServerProfileID).flatMap(UUID.init(uuidString:))
-            ?? registry.profiles.first { normalizedWebSocketURL($0.webSocketURL) == storedCredentialURL.flatMap(normalizedWebSocketURL) }?.id
         self.defaults = defaults
         self.serverProfileStore = resolvedProfileStore
         self.multiplayerClient = multiplayerClient ?? LocalMultiplayerClient()
@@ -182,17 +200,13 @@ final class GameViewModel {
         selectedServerID = registry.selectedServerID
         serverURL = resolvedServerURL
         displayName = defaults.string(forKey: Keys.displayName) ?? ""
-        sessionID = defaults.string(forKey: Keys.sessionID) ?? ""
-        joinCode = defaults.string(forKey: Keys.joinCode) ?? ""
-        activePlayerID = storedPlayerID
-        roomMode = RoomMode(rawValue: defaults.string(forKey: Keys.roomMode) ?? "friends") ?? .friends
-        resumeToken = resolvedTokenStore.load() ?? defaults.string(forKey: Keys.legacyResumeToken)
-        credentialServerProfileID = storedCredentialProfileID
-        credentialServerURL = storedCredentialURL
-        if let resumeToken { resolvedTokenStore.save(resumeToken) }
-        defaults.removeObject(forKey: Keys.legacyResumeToken)
-        defaults.set(clientID, forKey: Keys.clientID)
-
+        sessionID = ""
+        joinCode = ""
+        activePlayerID = nil
+        roomMode = .friends
+        resumeToken = nil
+        credentialServerProfileID = nil
+        credentialServerURL = nil
         if let data = defaults.data(forKey: Keys.gameState),
            let migratedData = migrateGameState(from: data, to: gameVersion),
            let state = try? JSONDecoder().decode(GameState.self, from: migratedData) {
@@ -200,6 +214,9 @@ final class GameViewModel {
         } else {
             localGameState = createInitialState()
         }
+        defaults.set(clientID, forKey: Keys.clientID)
+        migrateResumeCredentials()
+        loadSelectedCredentials()
         self.multiplayerClient.onMessage = { [weak self] message in self?.handleMultiplayerMessage(message) }
         self.multiplayerClient.onDisconnect = { [weak self] in
             guard let self else { return }
@@ -224,11 +241,16 @@ final class GameViewModel {
     }
 
     func startSoloGame() {
+        showingOfflineSoloChoice = false
         if multiplayerSession != nil || isMultiplayerConnected || canResumeSession {
             switchToSoloAfterLeave = true
             leaveMultiplayerGame()
             return
         }
+        multiplayerClient.disconnect()
+        pendingConnectionRequest = nil
+        isConnecting = false
+        connectionState = .disconnected
         multiplayerError = nil
         gameMode = .solo
     }
@@ -294,6 +316,7 @@ final class GameViewModel {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...50).contains(trimmedName.count) else { return "サーバー名は1〜50文字で入力してください。" }
         guard let normalizedURL = normalizedWebSocketURL(webSocketURL) else { return "WebSocket URLは ws:// または wss:// から入力してください。" }
+        guard !isMultiplayerConnected, !isConnecting, !isLeavingMultiplayer else { return "接続を終了してから編集してください。" }
         let timestamp = Date()
         if let id {
             guard let index = serverProfiles.firstIndex(where: { $0.id == id }) else { return "編集するサーバーが見つかりません。" }
@@ -302,9 +325,9 @@ final class GameViewModel {
             serverProfiles[index].webSocketURL = normalizedURL
             serverProfiles[index].updatedAt = timestamp
             if selectedServerID == id { serverURL = normalizedURL }
-            if credentialServerProfileID == id,
-               normalizedWebSocketURL(previousURL) != normalizedWebSocketURL(normalizedURL) {
-                clearActiveSessionCredentials()
+            if normalizedWebSocketURL(previousURL) != normalizedWebSocketURL(normalizedURL) {
+                removeCredentials(profileID: id)
+                if selectedServerID == id { loadSelectedCredentials() }
             }
         } else {
             let profile = ServerProfile(id: UUID(), name: trimmedName, webSocketURL: normalizedURL, createdAt: timestamp, updatedAt: timestamp)
@@ -321,8 +344,12 @@ final class GameViewModel {
     func selectServerProfile(id: UUID) {
         guard !isMultiplayerConnected, !isConnecting, !isLeavingMultiplayer,
               let profile = serverProfiles.first(where: { $0.id == id }) else { return }
+        multiplayerClient.disconnect()
+        multiplayerSession = nil
+        connectionState = .disconnected
         selectedServerID = id
         serverURL = profile.webSocketURL
+        loadSelectedCredentials()
         multiplayerError = nil
         persistServerProfiles()
     }
@@ -330,12 +357,13 @@ final class GameViewModel {
     func deleteServerProfile(id: UUID) {
         guard !isMultiplayerConnected, !isConnecting, !isLeavingMultiplayer,
               serverProfiles.contains(where: { $0.id == id }) else { return }
-        if credentialServerProfileID == id { clearActiveSessionCredentials() }
+        removeCredentials(profileID: id)
         serverProfiles.removeAll { $0.id == id }
         if selectedServerID == id {
             selectedServerID = serverProfiles.first?.id
             serverURL = selectedServerProfile?.webSocketURL ?? ""
         }
+        loadSelectedCredentials()
         persistServerProfiles()
     }
 
@@ -347,7 +375,7 @@ final class GameViewModel {
 
     private func ensureProfileForCurrentServerURL() {
         guard let normalizedURL = normalizedWebSocketURL(serverURL) else { return }
-        if let existing = serverProfiles.first(where: { normalizedWebSocketURL($0.webSocketURL) == normalizedURL }) {
+        if let existing = ([selectedServerProfile].compactMap { $0 } + serverProfiles).first(where: { normalizedWebSocketURL($0.webSocketURL) == normalizedURL }) {
             selectedServerID = existing.id
             serverURL = existing.webSocketURL
         } else {
@@ -393,6 +421,7 @@ final class GameViewModel {
     private func beginConnection(_ request: PendingConnectionRequest) {
         ensureProfileForCurrentServerURL()
         guard let url = URL(string: serverURL) else { return }
+        defaults.set(clientID, forKey: Keys.clientID)
         defaults.set(serverURL, forKey: Keys.serverURL)
         if !displayName.isEmpty { defaults.set(displayName, forKey: Keys.displayName) }
         multiplayerError = nil
@@ -479,7 +508,15 @@ final class GameViewModel {
         leaveAfterReconnect = false
         leaveRequestInFlight = false
         leaveReconnectAttempted = false
+        showingOfflineSoloChoice = switchToSoloAfterLeave
         switchToSoloAfterLeave = false
+        // Stop late server responses from reviving the session after the user chooses solo.
+        multiplayerClient.disconnect()
+        isConnecting = false
+        isMultiplayerConnected = false
+        multiplayerSession = nil
+        pendingConnectionRequest = nil
+        connectionState = .disconnected
         multiplayerError = message
     }
 
@@ -614,7 +651,6 @@ final class GameViewModel {
             roomMode = mode
             activePlayerID = playerID
             resumeToken = token
-            if let token { tokenStore.save(token) } else { tokenStore.remove() }
             persistActiveSessionCredentials()
             applyMultiplayerState(state)
             return
@@ -633,7 +669,6 @@ final class GameViewModel {
             activePlayerID = playerID
             roomMode = mode
             resumeToken = token
-            if let token { tokenStore.save(token) } else { tokenStore.remove() }
             persistActiveSessionCredentials()
             return
         case "stateSnapshot":
@@ -751,35 +786,122 @@ final class GameViewModel {
         }
     }
 
+    private var legacyCredentialKeys: [String] {
+        [Keys.sessionID, Keys.joinCode, Keys.playerID, Keys.roomMode, Keys.legacyResumeToken,
+         Keys.resumeServerProfileID, Keys.resumeServerURL]
+    }
+
+    private func migrateResumeCredentials() {
+        if let data = defaults.data(forKey: Keys.resumeCredentials),
+           let decoded = try? JSONDecoder().decode([ServerResumeCredentials].self, from: data) {
+            savedCredentials = decoded
+        }
+        guard let player = defaults.string(forKey: Keys.playerID),
+              let session = defaults.string(forKey: Keys.sessionID), !session.isEmpty else { return }
+        // Freeze provenance before profile selection can overwrite the legacy server URL.
+        // An unknown URL stays unknown on subsequent launches rather than adopting a new selection.
+        if defaults.string(forKey: Keys.resumeServerURL) == nil {
+            defaults.set(defaults.string(forKey: Keys.serverURL) ?? "", forKey: Keys.resumeServerURL)
+        }
+        let legacyURL = defaults.string(forKey: Keys.resumeServerURL).flatMap(normalizedWebSocketURL)
+        let explicitID = defaults.string(forKey: Keys.resumeServerProfileID).flatMap(UUID.init(uuidString:))
+        let matches = serverProfiles.filter { normalizedWebSocketURL($0.webSocketURL) == legacyURL }
+        // A selection alone is not evidence of which server owns a legacy credential.
+        let profile = explicitID.flatMap { id in matches.first { $0.id == id } }
+            ?? (explicitID == nil && matches.count == 1 ? matches.first : nil)
+        guard let profile, let legacyURL else { return }
+        if !savedCredentials.contains(where: { $0.serverProfileID == profile.id }) {
+            let mode = RoomMode(rawValue: defaults.string(forKey: Keys.roomMode) ?? "friends") ?? .friends
+            if mode == .private {
+                guard let token = tokenStore.load(profileID: nil) ?? defaults.string(forKey: Keys.legacyResumeToken),
+                      tokenStore.save(token, profileID: profile.id) else { return }
+            }
+            savedCredentials.append(ServerResumeCredentials(serverProfileID: profile.id, serverURL: legacyURL,
+                sessionID: session, joinCode: defaults.string(forKey: Keys.joinCode) ?? "",
+                playerID: player, roomMode: mode))
+            persistCredentialMetadata()
+        }
+        guard tokenStore.remove(profileID: nil) else { return }
+        legacyCredentialKeys.forEach { defaults.removeObject(forKey: $0) }
+    }
+
+    private func persistCredentialMetadata() {
+        if let data = try? JSONEncoder().encode(savedCredentials) {
+            defaults.set(data, forKey: Keys.resumeCredentials)
+        }
+    }
+
+    private func loadSelectedCredentials() {
+        let credentials = savedCredentials.first {
+            $0.serverProfileID == selectedServerID && normalizedWebSocketURL($0.serverURL) == normalizedWebSocketURL(serverURL)
+        }
+        sessionID = credentials?.sessionID ?? ""
+        joinCode = credentials?.joinCode ?? ""
+        activePlayerID = credentials?.playerID
+        roomMode = credentials?.roomMode ?? .friends
+        credentialServerProfileID = credentials?.serverProfileID
+        credentialServerURL = credentials?.serverURL
+        resumeToken = credentials.flatMap { tokenStore.load(profileID: $0.serverProfileID) }
+    }
+
     private func persistActiveSessionCredentials() {
-        credentialServerProfileID = selectedServerID
-        credentialServerURL = serverURL
-        defaults.set(serverURL, forKey: Keys.serverURL)
+        guard let id = selectedServerID, let playerID = activePlayerID,
+              let url = normalizedWebSocketURL(serverURL) else { return }
+        credentialServerProfileID = id
+        credentialServerURL = url
+        if let resumeToken, !tokenStore.save(resumeToken, profileID: id) {
+            multiplayerError = "再接続情報をKeychainに保存できませんでした。"
+            return
+        }
+        if roomMode == .friends { tokenStore.remove(profileID: id) }
+        savedCredentials.removeAll { $0.serverProfileID == id }
+        savedCredentials.append(ServerResumeCredentials(serverProfileID: id, serverURL: url,
+            sessionID: sessionID, joinCode: joinCode, playerID: playerID, roomMode: roomMode))
+        persistCredentialMetadata()
         defaults.set(displayName, forKey: Keys.displayName)
-        defaults.set(sessionID, forKey: Keys.sessionID)
-        defaults.set(joinCode, forKey: Keys.joinCode)
-        defaults.set(activePlayerID, forKey: Keys.playerID)
-        defaults.set(roomMode.rawValue, forKey: Keys.roomMode)
-        defaults.set(credentialServerProfileID?.uuidString.lowercased(), forKey: Keys.resumeServerProfileID)
-        defaults.set(credentialServerURL, forKey: Keys.resumeServerURL)
+    }
+
+    private func removeCredentials(profileID: UUID) {
+        tokenStore.remove(profileID: profileID)
+        savedCredentials.removeAll { $0.serverProfileID == profileID }
+        persistCredentialMetadata()
     }
 
     private func clearActiveSessionCredentials() {
-        sessionID = ""
-        joinCode = ""
-        activePlayerID = nil
-        roomMode = .friends
-        resumeToken = nil
-        credentialServerProfileID = nil
-        credentialServerURL = nil
-        tokenStore.remove()
-        defaults.removeObject(forKey: Keys.sessionID)
-        defaults.removeObject(forKey: Keys.joinCode)
-        defaults.removeObject(forKey: Keys.playerID)
-        defaults.removeObject(forKey: Keys.roomMode)
-        defaults.removeObject(forKey: Keys.legacyResumeToken)
-        defaults.removeObject(forKey: Keys.resumeServerProfileID)
-        defaults.removeObject(forKey: Keys.resumeServerURL)
+        if let id = credentialServerProfileID { removeCredentials(profileID: id) }
+        loadSelectedCredentials()
+    }
+
+    func forgetResumeAndStartSolo() {
+        switchToSoloAfterLeave = true
+        completeLeave() // Local reset only: never sends a remote leave request.
+        showingOfflineSoloChoice = false
+    }
+
+    @discardableResult
+    func deleteAllLocalData() -> Bool {
+        guard tokenStore.removeAll() else {
+            multiplayerError = "Keychainの保存データを削除できませんでした。もう一度お試しください。"
+            return false
+        }
+        completeLeave()
+        savedCredentials = []
+        serverProfiles = []
+        selectedServerID = nil
+        serverURL = ""
+        displayName = ""
+        localGameState = createInitialState()
+        undoStack = []
+        redoStack = []
+        deltaValues = [:]
+        clientID = UUID().uuidString.lowercased()
+        showingOfflineSoloChoice = false
+        gameMode = .none
+        (legacyCredentialKeys + [Keys.gameState, Keys.clientID, Keys.serverURL, Keys.displayName,
+            Keys.resumeCredentials, "RedPlanetServerProfiles", "RedPlanetSelectedServerID"]).forEach {
+            defaults.removeObject(forKey: $0)
+        }
+        return true
     }
 
     func savePersistentState() {

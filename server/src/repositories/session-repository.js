@@ -32,6 +32,17 @@ export class SessionRepository {
     this.database.prepare("DELETE FROM sessions WHERE session_id = ?").run(sessionId);
   }
 
+  deleteInactiveBefore(cutoff) {
+    // Connected state is maintained synchronously by SessionManager and reset at startup.
+    // Foreign keys cascade to players, resources, identities, credentials and actions.
+    return this.database.prepare(`
+      DELETE FROM sessions WHERE updated_at < ?
+      AND NOT EXISTS (
+        SELECT 1 FROM players WHERE players.session_id = sessions.session_id AND connected = 1
+      ) RETURNING session_id AS sessionId
+    `).all(cutoff);
+  }
+
   count() {
     return this.database.prepare("SELECT COUNT(*) AS count FROM sessions").get().count;
   }

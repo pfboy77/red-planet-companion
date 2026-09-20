@@ -73,3 +73,13 @@ func normalizedWebSocketURL(_ value: String) -> String? {
     components.host = host.lowercased()
     return components.url?.absoluteString
 }
+
+/// Non-secret resume metadata; authentication tokens live only in ResumeTokenStore.
+struct ServerResumeCredentials: Codable, Equatable {
+    let serverProfileID: UUID
+    let serverURL: String
+    let sessionID: String
+    let joinCode: String
+    let playerID: String
+    let roomMode: RoomMode
+}

@@ -31,3 +31,6 @@ yarn-error.log*
 # Local API persistence
 local-data.json
 server/data/
+
+# Local release validation artifacts
+.validation/

@@ -33,15 +33,43 @@ SERVER_NAME="Home Red Planet Server" npm start
 
 `HOST` and `PORT` remain configurable; their defaults are `0.0.0.0` and `8080`.
 `MAX_SESSIONS` is a positive integer and defaults to `1000`; once reached, new
-session creation is rejected until an existing session is explicitly left and
-deleted. This bounds persistent database growth. `DB_PATH` must be a normal
+session creation is rejected until an existing session is explicitly left or
+expired sessions are cleaned. This bounds persistent database growth. `DB_PATH` must be a normal
 filesystem path; SQLite `file:` URI filenames are not supported.
 
-For internet deployment, terminate TLS in a reverse proxy such as Caddy and
-register its `wss://` URL in the clients. Also add reverse-proxy connection and
-request rate limits, and define an inactive-session retention/cleanup policy;
-the session cap limits disk growth but is not a complete public-service DoS
-defense.
+## Internet deployment
+
+Direct internet exposure of the Node process is **not recommended**. This server
+is not a production anti-DDoS platform. Bind Node to loopback or a private network,
+terminate TLS at a reverse proxy, and expose only its `wss://` endpoint. `ws://`
+is intended for trusted local networks. Configure connection-count limits,
+connection/request rates and WebSocket message rates at the proxy; limit unauthenticated
+connections too. Use firewall/network controls and maintain the runtime and proxy.
+`MAX_SESSIONS` and the 64 KiB message limit do not replace these controls.
+Keep consistent SQLite backups (including WAL state, using SQLite backup tooling)
+if persistent games matter; define access controls and retention for backups and
+proxy logs. Never log raw private resume tokens or full authentication messages.
+
+## Inactive-session retention
+
+`SESSION_RETENTION_DAYS` defaults to **30**. It accepts an integer from 0 to 36500;
+0 disables cleanup. Empty, fractional, negative and invalid values fail startup
+with a configuration error. Example: `SESSION_RETENTION_DAYS=7 npm start`.
+
+Cleanup runs at startup and before each valid session creation, including when
+capacity has been reached. Sessions with `updated_at` strictly older than the
+cutoff are removed only if no player is currently connected. Startup first marks
+all old connections disconnected. Foreign-key cascades remove players, resources,
+client associations, credential hashes and action history. Live state projections
+are also removed. Recent sessions and sessions exactly at the cutoff remain.
+There is no periodic timer, so shutdown has no cleanup timer to leak. On an idle
+server with no new sessions, expired data remains until the next startup or create.
+
+This retention limits accumulation; it is not a guarantee of deletion at an exact
+time. Active sessions and sessions whose activity updates `updated_at` are retained.
+Disabling cleanup keeps data until explicit leave or operator maintenance. Backups
+and reverse-proxy logs require their own deletion policy. Device-local deletion
+does not delete server data. Publish your operator-specific retention/privacy policy.
 
 ## Persistence
 

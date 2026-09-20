@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { openDatabase } from "./database.js";
 import { ActionRepository } from "./repositories/action-repository.js";
 import { PlayerRepository } from "./repositories/player-repository.js";
@@ -10,7 +10,8 @@ export const DEFAULT_MAX_SESSIONS = 1000;
 
 const now = () => new Date().toISOString();
 const resources = () => Object.fromEntries(RESOURCE_IDS.map((id) => [id, { amount: 0, production: 0 }]));
-const joinCode = () => Array.from({ length: 6 }, () => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(Math.random() * 32)]).join("");
+const JOIN_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export const generateJoinCode = () => Array.from({ length: 6 }, () => JOIN_CODE_ALPHABET[randomInt(JOIN_CODE_ALPHABET.length)]).join("");
 const newResumeToken = () => randomBytes(32).toString("base64url");
 const error = (code, message) => ({ code, message });
 const isUUID = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
@@ -34,6 +35,14 @@ const sessionLimit = (value) => {
   }
   return parsed;
 };
+
+export function retentionDays(value = 30) {
+  const parsed = Number(value);
+  if (String(value).trim() === "" || !Number.isSafeInteger(parsed) || parsed < 0 || parsed > 36500) {
+    throw new Error("SESSION_RETENTION_DAYS must be an integer from 0 to 36500 (0 disables cleanup)");
+  }
+  return parsed;
+}
 
 export const hashResumeToken = (token) => createHash("sha256").update(token).digest("hex");
 
@@ -61,8 +70,10 @@ class RepositorySessionView {
 }
 
 export class SessionManager {
-  constructor({ databasePath = ":memory:", serverName, maxSessions = process.env.MAX_SESSIONS } = {}) {
+  constructor({ databasePath = ":memory:", serverName, maxSessions = process.env.MAX_SESSIONS, sessionRetentionDays = process.env.SESSION_RETENTION_DAYS, clock = () => new Date() } = {}) {
     this.maxSessions = sessionLimit(maxSessions);
+    this.retentionDays = retentionDays(sessionRetentionDays);
+    this.clock = clock;
     const opened = openDatabase({ databasePath, serverName });
     this.database = opened.database;
     this.databasePath = opened.databasePath;
@@ -73,12 +84,14 @@ export class SessionManager {
     this.stateProjections = new Map();
     this.sessions = new RepositorySessionView(this);
     this.closed = false;
+    this.cleanupInactiveSessions();
   }
 
   createSession({ clientId, displayName, roomMode = "friends" }) {
     if (!validIdentity(clientId, displayName) || !ROOM_MODES.includes(roomMode)) {
       return { error: error("INVALID_MESSAGE", "A valid clientId, displayName, and roomMode are required") };
     }
+    this.cleanupInactiveSessions();
     if (this.sessionRepository.count() >= this.maxSessions) {
       return { error: error("SERVER_CAPACITY_REACHED", "The server has reached its session capacity") };
     }
@@ -87,7 +100,7 @@ export class SessionManager {
     const state = {
       protocolVersion: "v1",
       sessionId: randomUUID(),
-      joinCode: joinCode(),
+      joinCode: generateJoinCode(),
       roomMode,
       revision: 0,
       createdAt: timestamp,
@@ -338,6 +351,14 @@ export class SessionManager {
       this.playerRepository.setConnected(playerId, true, timestamp);
       this.sessionRepository.touch(sessionId, timestamp);
     })();
+  }
+
+  cleanupInactiveSessions() {
+    if (this.closed || this.retentionDays === 0) return 0;
+    const cutoff = new Date(this.clock().getTime() - this.retentionDays * 86400000).toISOString();
+    const removed = this.sessionRepository.deleteInactiveBefore(cutoff);
+    for (const { sessionId } of removed) this.stateProjections.delete(sessionId);
+    return removed.length;
   }
 
   close() {
